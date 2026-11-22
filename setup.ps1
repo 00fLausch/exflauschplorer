@@ -219,17 +219,19 @@ try {
     }
     $pinHash = $null
     if ($savedSettings -and $savedSettings.pinHash) { $pinHash = [string]$savedSettings.pinHash }
-    $settings = [ordered]@{
-        port = $httpPort
-        tailscaleHttpsPort = $httpsPort
-        allowedLogins = $allowedLogins
-        shareAllDrives = $shareEverything
-        roots = $roots
-        readOnlyMode = $readOnlyMode
-        protectSystemFolders = $protectSystemFolders
-        showHiddenByDefault = if ($savedSettings) { [bool]$savedSettings.showHiddenByDefault } else { $false }
-        pinHash = $pinHash
+    # Keep favorites, display preferences and future settings when reconfiguring.
+    $settings = [ordered]@{}
+    if ($savedSettings) {
+        foreach ($property in $savedSettings.PSObject.Properties) { $settings[$property.Name] = $property.Value }
     }
+    $settings['port'] = $httpPort
+    $settings['tailscaleHttpsPort'] = $httpsPort
+    $settings['allowedLogins'] = $allowedLogins
+    $settings['shareAllDrives'] = $shareEverything
+    $settings['roots'] = $roots
+    $settings['readOnlyMode'] = $readOnlyMode
+    $settings['protectSystemFolders'] = $protectSystemFolders
+    $settings['pinHash'] = $pinHash
     $temporarySettings = "$settingsPath.tmp"
     [IO.File]::WriteAllText($temporarySettings, ($settings | ConvertTo-Json -Depth 8), [Text.UTF8Encoding]::new($false))
     Move-Item -LiteralPath $temporarySettings -Destination $settingsPath -Force
