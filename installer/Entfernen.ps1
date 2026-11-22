@@ -16,7 +16,13 @@ try {
             throw 'Es sind noch Datei- oder Uploadvorgänge aktiv. Bitte zuerst abschließen und die Deinstallation erneut starten.'
         }
     }
-    foreach ($processInfo in @($watchers) + @($apps)) { Stop-Process -Id $processInfo.ProcessId -Force }
+    foreach ($processInfo in @($watchers) + @($apps)) {
+        $process = Get-Process -Id $processInfo.ProcessId -ErrorAction SilentlyContinue
+        if ($process) {
+            Stop-Process -Id $process.Id -Force
+            if (-not $process.WaitForExit(5000)) { throw 'Die App konnte nicht beendet werden. Bitte erneut versuchen.' }
+        }
+    }
     Remove-ItemProperty -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' -Name 'WindowsMobileExplorer' -ErrorAction SilentlyContinue
     exit 0
 } catch {
