@@ -290,7 +290,7 @@ try {
     finally { $serveProcess.Dispose() }
 
     $confirmedServe = (& $tailscale serve status 2>&1 | Out-String)
-    if (-not $confirmedServe.Contains("127.0.0.1:$httpPort")) {
+    if (-not [regex]::IsMatch($confirmedServe, "(?ms)https://[^`r`n]*:$httpsPort\b[^`r`n]*(?:`r?`n[^`r`n]*){0,3}127\.0\.0\.1:$httpPort\b")) {
         throw 'Tailscale Serve hat den Proxy nicht bestätigt. Die App bleibt ausschließlich auf 127.0.0.1 erreichbar.'
     }
     $confirmedFunnel = (& $tailscale funnel status 2>&1 | Out-String)
