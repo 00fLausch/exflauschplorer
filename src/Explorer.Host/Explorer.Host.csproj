@@ -1,0 +1,33 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <UseWindowsForms>true</UseWindowsForms>
+    <EnableWindowsTargeting>true</EnableWindowsTargeting>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <ApplicationHighDpiMode>PerMonitorV2</ApplicationHighDpiMode>
+    <InvariantGlobalization>false</InvariantGlobalization>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Explorer.Core\Explorer.Core.csproj" />
+  </ItemGroup>
+
+  <Target Name="BuildExplorerWeb" BeforeTargets="Build" Condition="'$(DesignTimeBuild)' != 'true' and '$(SkipExplorerWebBuild)' != 'true'">
+    <Exec Command="npm run build" WorkingDirectory="$(MSBuildProjectDirectory)\..\Explorer.Web" />
+    <ItemGroup>
+      <ExplorerWebAsset Include="$(MSBuildProjectDirectory)\..\Explorer.Web\dist\**\*" />
+    </ItemGroup>
+    <Copy SourceFiles="@(ExplorerWebAsset)" DestinationFiles="@(ExplorerWebAsset->'$(OutDir)wwwroot/%(RecursiveDir)%(Filename)%(Extension)')" SkipUnchangedFiles="true" />
+  </Target>
+
+  <Target Name="CopyExplorerWebAssetsToPublish" AfterTargets="Publish">
+    <ItemGroup>
+      <ExplorerPublishAsset Include="$(MSBuildProjectDirectory)\..\Explorer.Web\dist\**\*" />
+    </ItemGroup>
+    <Copy SourceFiles="@(ExplorerPublishAsset)" DestinationFiles="@(ExplorerPublishAsset->'$(PublishDir)wwwroot/%(RecursiveDir)%(Filename)%(Extension)')" SkipUnchangedFiles="true" />
+  </Target>
+
+</Project>

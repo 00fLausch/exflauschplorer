@@ -1,0 +1,13 @@
+.tools/
+**/node_modules/
+**/dist/
+**/bin/
+**/obj/
+**/playwright-report/
+**/test-results/
+src/Explorer.Web/tests/e2e/.runtime.json
+publish/
+artifacts/
+PLAN.md
+.test-run.log
+docs/verification/

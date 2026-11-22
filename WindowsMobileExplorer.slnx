@@ -1,0 +1,10 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/Explorer.Core/Explorer.Core.csproj" />
+    <Project Path="src/Explorer.Host/Explorer.Host.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/Explorer.Core.Tests/Explorer.Core.Tests.csproj" />
+    <Project Path="tests/Explorer.Host.Tests/Explorer.Host.Tests.csproj" />
+  </Folder>
+</Solution>
