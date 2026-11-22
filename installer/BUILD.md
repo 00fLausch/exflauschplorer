@@ -14,4 +14,6 @@ python installer/build-zip.py
 
 Falls Inno Setup an einem anderen Ort installiert ist, den Pfad zu `ISCC.exe` entsprechend ändern. Die Pakete liegen anschließend unter `artifacts/`. Die ZIP-Variante enthält den gleichen Einrichtungsdialog und installiert für den aktuellen Benutzer; sie ist keine eigenständige portable Version. Nur der EXE-Installer registriert sich in Windows unter „Installierte Apps“.
 
+Release-Builds deaktivieren Debugsymbole über `Directory.Build.props`, damit die verteilten DLLs keine lokalen PDB-Pfade des Build-Rechners enthalten.
+
 Die Oberfläche für Dokumentationsbilder lässt sich mit `node scripts/capture-demo.mjs` in `src/Explorer.Web` starten. Das Skript verwendet ausschließlich synthetische API-Antworten und benötigt Google Chrome sowie optional FFmpeg für die Audiodemo.

@@ -1,0 +1,7 @@
+<Project>
+  <!-- Release binaries are distributed without machine-specific PDB paths. -->
+  <PropertyGroup Condition="'$(Configuration)' == 'Release'">
+    <DebugType>none</DebugType>
+    <DebugSymbols>false</DebugSymbols>
+  </PropertyGroup>
+</Project>

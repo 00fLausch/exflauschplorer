@@ -49,7 +49,7 @@ Der PC muss eingeschaltet und angemeldet sein, und beide Geräte müssen Tailsca
 - Der Wächter startet die App nach einem unerwarteten Prozessabbruch erneut und begrenzt wiederholte Neustarts. Ein reguläres **Beenden** über das Tray-Menü bleibt ein Beenden; bei aktivem Autostart startet die App bei der nächsten Windows-Anmeldung erneut. Eine hängende, aber weiterhin laufende App erkennt der Wächter nicht.
 - Der Zugriff bleibt an die tatsächlichen Windows-Rechte gebunden. Systemordner sind standardmäßig zusätzlich geschützt; Freigaben und Schutz können in den Einstellungen überprüft werden.
 - Beim Deinstallieren werden Programm und Autostart entfernt. Einstellungen und eine bestehende Tailscale-Serve-Route bleiben erhalten; eine solche Route kann bei Bedarf in Tailscale separat entfernt werden.
-- Das Repository ist privat. Die Release-Downloads sind nur für berechtigte GitHub-Konten sichtbar.
+- Der Quellcode und die Releases sind öffentlich verfügbar. Der Zugriff auf eine laufende App erfolgt über das eigene Tailscale-Netz.
 
 ## Aus dem Quellcode
 
