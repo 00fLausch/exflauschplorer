@@ -1,5 +1,9 @@
 # Windows Datei-Explorer für iPhone und Tailscale
 
+## PDF-Vorschau
+
+PDF-Dateien werden mit PDF.js auf dem Mobilgerät seitenweise angezeigt. Die Vorschau bietet Seitenwechsel, direkte Seiteneingabe, Zoom und Passwortabfrage. Daten kommen über den geschützten Stream; bei großen Dokumenten werden Teilanfragen genutzt. PDF.js und benötigte Schrift-, CMap-, Farbprofil- und Decoderdateien liegen im App-Build. Bei einem Anzeigeproblem stehen „Im Browser öffnen“ und „Laden“ zur Verfügung. Textauswahl, Suche im Dokument und interaktive Formularbearbeitung sind in dieser Vorschau nicht implementiert. Der PDF.js-Legacy-Build unterstützt laut Projektangaben Safari ab Version 18; auf älteren Geräten kann die Browser- oder Download-Alternative notwendig sein.
+
 Ein Windows-Trayprogramm stellt eine deutschsprachige, installierbare PWA bereit. Der HTTP-Server bindet ausschließlich an `127.0.0.1`; Tailscale Serve übernimmt HTTPS und setzt die Tailscale-Identitätsheader. Die App läuft in der angemeldeten Windows-Sitzung, startet über den HKCU-Autostart und benötigt keine Administratorrechte.
 
 ## Architekturplan

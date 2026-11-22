@@ -65,6 +65,9 @@ try {
   await writeFile(path.join(fixtureRoot, 'touchprobe.svg'), imageFixture)
   await sharp(Buffer.from(imageFixture)).png().toFile(path.join(fixtureRoot, 'thumbnail-fixture.png'))
   await writeFile(path.join(fixtureRoot, 'iphone-preview.pdf'), createPdfFixture())
+  await writeFile(path.join(fixtureRoot, 'large-preview.pdf'), createPdfFixture(true))
+  await writeFile(path.join(fixtureRoot, 'corrupt-preview.pdf'), '%PDF-1.4\nthis is not a valid PDF')
+  await copyFile(path.resolve(scriptDir, '../tests/e2e/fixtures/password-protected.pdf'), path.join(fixtureRoot, 'password-protected.pdf'))
   await copyFile(path.resolve(scriptDir, '../tests/e2e/fixtures/iphone-preview.mp4'), path.join(fixtureRoot, 'iphone-preview.mp4'))
   await copyFile(path.resolve(scriptDir, '../tests/e2e/fixtures/iphone-preview.mp3'), path.join(fixtureRoot, 'iphone-preview.mp3'))
   const longVideoDirectory = path.join(fixtureRoot, '5GB video')
@@ -156,14 +159,16 @@ async function waitForServer(child) {
   throw new Error('Explorer.Host did not become ready within 60 seconds.')
 }
 
-function createPdfFixture() {
-  const text = 'BT /F1 18 Tf 30 100 Td (Test PDF preview) Tj ET'
+function createPdfFixture(large = false) {
+  const stream = (text) => `<< /Length ${Buffer.byteLength(text, 'ascii')} >>\nstream\n${text}\nendstream`
+  const page = (content) => `<< /Type /Page /Parent 2 0 R /MediaBox [0 0 300 400] /Resources << /Font << /F1 9 0 R >> >> /Contents ${content} 0 R >>`
   const objects = [
     '<< /Type /Catalog /Pages 2 0 R >>',
-    '<< /Type /Pages /Kids [3 0 R] /Count 1 >>',
-    '<< /Type /Page /Parent 2 0 R /MediaBox [0 0 300 200] /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>',
+    '<< /Type /Pages /Kids [3 0 R 5 0 R 7 0 R] /Count 3 >>',
+    page(4), stream(`${large ? `%${'x'.repeat(400_000)}\n` : ''}0 0 0 rg 20 230 260 120 re f BT /F1 18 Tf 30 190 Td (PDF test page 1) Tj ET`),
+    page(6), stream('0 0 0 rg 20 200 260 150 re f BT /F1 18 Tf 30 160 Td (PDF test page 2) Tj ET'),
+    page(8), stream('0 0 0 rg 20 170 260 180 re f BT /F1 18 Tf 30 130 Td (PDF test page 3) Tj ET'),
     '<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>',
-    `<< /Length ${Buffer.byteLength(text, 'ascii')} >>\nstream\n${text}\nendstream`,
   ]
   let pdf = '%PDF-1.4\n'
   const offsets = [0]

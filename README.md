@@ -16,6 +16,7 @@ EXfLauschPLORER verbindet einen Windows-PC über dein privates Tailscale-Netz mi
 
 - **Deinen PC durchsuchen:** Laufwerke, Windows-Schnellzugriffe, wichtige Ordner und Favoriten direkt auf dem Handy öffnen; suchen, sortieren und zwischen Ansichten wechseln.
 - **Dateien verwalten:** Kopieren, verschieben, umbenennen, hoch- und herunterladen sowie Papierkorb und Eigenschaften nutzen. Die tatsächlich verfügbaren Aktionen hängen von den Windows-Rechten und deinen Freigaben ab.
+- **PDFs lesen:** Mehrseitige Dokumente direkt in der App öffnen, zwischen Seiten wechseln und vergrößern; passwortgeschützte PDFs lassen sich nach Eingabe des Passworts anzeigen.
 - **Musik und Videos streamen:** Medien bleiben auf dem PC. Der Player bietet Warteschlange, schwebende Miniansicht, Zeitleiste und Sprünge. Für Audiodateien kann eine Wellenform beim Spulen helfen.
 - **Platzfresser finden:** Der Clean-Modus zeigt unterstützte Cache- und temporäre Dateien zur Auswahl mit Informationen an. Gelöscht wird erst nach ausdrücklicher Auswahl und Bestätigung in der App.
 - **Privat verbinden:** Tailscale Serve stellt den Zugriff innerhalb des Tailnets bereit; der lokale App-Server lauscht nur auf dem PC. Eine Anmeldeliste und optionaler PIN ergänzen den Zugriffsschutz.
@@ -44,6 +45,7 @@ Der PC muss eingeschaltet und angemeldet sein, und beide Geräte müssen Tailsca
 
 - Die Wiedergabe hängt von den Audio- und Videoformaten ab, die der Browser auf deinem Gerät unterstützt. Eine Umwandlung während der Wiedergabe ist nicht eingebaut.
 - Für die Audio-Wellenform werden **FFmpeg und FFprobe auf dem PC** benötigt. Ohne sie bleibt die normale Zeitleiste bedienbar. Mehr dazu im [technischen Handbuch](docs/manual.md).
+- Die PDF-Vorschau verwendet [Mozilla PDF.js](https://mozilla.github.io/pdf.js/) und stellt jeweils eine Seite dar. Ausfüllbare Formulare und Textauswahl werden in dieser Vorschau nicht unterstützt; zum Bearbeiten die Datei in einer passenden PDF-App öffnen.
 - Der Wächter startet die App nach einem unerwarteten Prozessabbruch erneut und begrenzt wiederholte Neustarts. Ein reguläres **Beenden** über das Tray-Menü bleibt ein Beenden; bei aktivem Autostart startet die App bei der nächsten Windows-Anmeldung erneut. Eine hängende, aber weiterhin laufende App erkennt der Wächter nicht.
 - Der Zugriff bleibt an die tatsächlichen Windows-Rechte gebunden. Systemordner sind standardmäßig zusätzlich geschützt; Freigaben und Schutz können in den Einstellungen überprüft werden.
 - Beim Deinstallieren werden Programm und Autostart entfernt. Einstellungen und eine bestehende Tailscale-Serve-Route bleiben erhalten; eine solche Route kann bei Bedarf in Tailscale separat entfernt werden.
@@ -51,7 +53,7 @@ Der PC muss eingeschaltet und angemeldet sein, und beide Geräte müssen Tailsca
 
 ## Aus dem Quellcode
 
-Voraussetzungen: Windows x64, Node.js/npm, .NET-10-SDK und Tailscale. Im Projektordner:
+Voraussetzungen: Windows x64, Node.js 22.13 oder neuer und npm, .NET-10-SDK und Tailscale. Im Projektordner:
 
 ```powershell
 .\setup.ps1

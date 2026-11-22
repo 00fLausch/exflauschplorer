@@ -6,7 +6,7 @@ root = Path(__file__).resolve().parent.parent
 publish = root / 'publish' / 'win-x64'
 if not (publish / 'Explorer.Host.exe').is_file() or not (publish / 'wwwroot' / 'index.html').is_file():
     raise SystemExit('Publish fehlt oder ist unvollständig.')
-destination = root / 'artifacts' / 'EXfLauschPLORER-0.1.0-win-x64.zip'
+destination = root / 'artifacts' / 'EXfLauschPLORER-0.1.1-win-x64.zip'
 destination.parent.mkdir(parents=True, exist_ok=True)
 with ZipFile(destination, 'w', compression=ZIP_DEFLATED, compresslevel=6) as archive:
     for source, name in [(root / 'setup.ps1', 'setup.ps1'), (root / 'installer' / 'Einrichtung.ps1', 'Einrichtung.ps1'), (root / 'installer' / 'ZIP-starten.cmd', 'ZIP-starten.cmd')]:

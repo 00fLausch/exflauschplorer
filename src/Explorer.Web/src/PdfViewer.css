@@ -1,0 +1,19 @@
+.pdf-viewer { display: flex; width: 100%; height: 100%; min-height: 0; flex-direction: column; background: #0b1019; }
+.pdf-toolbar { display: flex; flex: 0 0 auto; min-height: 52px; align-items: center; gap: 2px; padding: 3px 7px; border-bottom: 1px solid #263444; background: #111c2a; }
+.pdf-toolbar button { display: grid; width: 44px; height: 44px; flex: 0 0 44px; place-items: center; border: 0; border-radius: 10px; color: #d8e7f4; background: transparent; }
+.pdf-toolbar button:disabled { opacity: .3; }
+.pdf-toolbar button:not(:disabled):active { background: #1c3e40; }
+.pdf-toolbar-spacer { flex: 1; min-width: 0; }
+.pdf-page-form { display: flex; align-items: center; gap: 5px; color: #aebfd1; white-space: nowrap; font-size: .75rem; }
+.pdf-page-form input { width: 44px; height: 36px; padding: 0 3px; border: 1px solid #34485c; border-radius: 7px; color: #f4f7fb; background: #192839; text-align: center; font-size: .85rem; }
+.pdf-zoom-label { width: 39px; color: #aebfd1; text-align: center; font-size: .7rem; }
+.pdf-scroll { position: relative; display: block; min-height: 0; flex: 1; overflow: auto; overscroll-behavior: contain; touch-action: pan-x pan-y pinch-zoom; }
+.pdf-page { display: block; max-width: none; margin: 12px auto; background: white; box-shadow: 0 3px 18px #0008; }
+.pdf-rendering { position: sticky; bottom: 12px; display: flex; width: max-content; align-items: center; gap: 7px; margin: 0 auto 12px; padding: 7px 10px; border-radius: 9px; color: #d8e7f4; background: #101d2bf0; font-size: .75rem; }
+.pdf-message { display: flex; min-height: 0; flex: 1; align-items: center; justify-content: center; flex-direction: column; gap: 14px; padding: 24px; color: #d8e7f4; text-align: center; }
+.pdf-password label { align-self: center; }
+.pdf-password input { width: min(100%, 320px); min-height: 44px; padding: 8px 12px; border: 1px solid #34485c; border-radius: 10px; color: #fff; background: #192839; font-size: 1rem; }
+.pdf-message .primary-button { min-height: 44px; }
+.pdf-message a { display: inline-flex; min-height: 44px; align-items: center; color: #70c9ff; }
+.preview-stage.preview-pdf { display: block; overflow: hidden; }
+@media (max-width: 360px) { .pdf-zoom-label { display: none; } }

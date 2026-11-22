@@ -135,7 +135,7 @@ test('iPhone previews and seeks audio/video, shows a shell thumbnail and streams
   await pdfFile.click()
   const pdfPreview = page.getByRole('dialog', { name: 'Vorschau für iphone-preview.pdf' })
   await expect(pdfPreview).toBeVisible()
-  await expect(pdfPreview.locator('iframe')).toHaveAttribute('src', /\/api\/v1\/stream\?path=/)
+  await expect(pdfPreview.locator('canvas.pdf-page')).toHaveAttribute('data-rendered-page', '1', { timeout: 20_000 })
   const pdfRange = await page.context().request.get(`${baseURL}/api/v1/stream?${new URLSearchParams({ path: path.join(fixtureRoot, 'iphone-preview.pdf') })}`, {
     headers: { Range: 'bytes=0-7' },
   })

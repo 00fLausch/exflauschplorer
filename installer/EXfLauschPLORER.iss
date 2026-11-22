@@ -1,5 +1,5 @@
 #define MyAppName "EXfLauschPLORER"
-#define MyAppVersion "0.1.0"
+#define MyAppVersion "0.1.1"
 [Setup]
 #ifdef TESTBUILD
 AppId={{D26F30A8-6988-4D15-A8FA-A0E4A7B22E11}
@@ -16,7 +16,7 @@ PrivilegesRequired=lowest
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 OutputDir=..\artifacts
-OutputBaseFilename=EXfLauschPLORER-Setup-0.1.0-win-x64
+OutputBaseFilename=EXfLauschPLORER-Setup-{#MyAppVersion}-win-x64
 Compression=lzma2
 SolidCompression=yes
 WizardStyle=modern

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { Component, lazy, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { useVirtualizer } from '@tanstack/react-virtual'
 import {
   Archive, ArrowDown, ArrowLeft, ArrowRight, ArrowUp, AudioLines, Check, ChevronDown,
@@ -19,6 +19,14 @@ import { CleanPage } from './CleanPage'
 import { isPlayableMedia } from './mediaUtils'
 import './App.css'
 import './signal-slate.css'
+
+const PdfViewer = lazy(() => import('./PdfViewer'))
+
+class PdfPreviewBoundary extends Component<{ children: React.ReactNode; source: string }, { failed: boolean }> {
+  state = { failed: false }
+  static getDerivedStateFromError() { return { failed: true } }
+  render() { return this.state.failed ? <div className="pdf-message" role="alert">{de.pdfOpenError}<a href={this.props.source} target="_blank" rel="noopener noreferrer">{de.pdfOpenBrowser}</a></div> : this.props.children }
+}
 
 type ViewMode = 'list' | 'details' | 'grid'
 type MainPage = 'files' | 'recent' | 'transfers' | 'more' | 'recycle' | 'clean'
@@ -1177,7 +1185,7 @@ function App() {
 
   const openPreview = useCallback(async (entry: FileEntry) => {
     const kind = fileKind(entry)
-    if (kind !== 'code' && !['pdf', 'md', 'markdown'].includes(entry.extension)) return
+    if (kind !== 'code') return
     try {
       const response = await fetch(explorerApi.streamUrl(entry), { credentials: 'same-origin' })
       if (!response.ok) throw new Error(de.uiDieDateiKannNichtGelesenWerden)
@@ -2033,6 +2041,7 @@ function ActionButton({ icon, label, onClick, primary = false }: { icon: React.R
 function PreviewModal({ entry, text, error, zoom, onZoom, returnFocusTarget, onClose, onDownload, onProperties, onEdit }: { entry: FileEntry; text: string | null; error: string; zoom: number; onZoom: (zoom: number) => void; returnFocusTarget: HTMLElement | null; onClose: () => void; onDownload: () => void; onProperties: (trigger: HTMLButtonElement) => void; onEdit: () => void }) {
   const kind = fileKind(entry)
   const isMarkdown = ['md', 'markdown'].includes(entry.extension.toLowerCase())
+  const isPdf = entry.extension.toLowerCase() === 'pdf'
   const source = explorerApi.streamUrl(entry)
   const overlayRef = useModalDialogFocus<HTMLDivElement>(onClose, returnFocusTarget)
   const imageRef = useRef<HTMLImageElement>(null)
@@ -2113,13 +2122,13 @@ function PreviewModal({ entry, text, error, zoom, onZoom, returnFocusTarget, onC
     panStart.current = remaining && zoom > 1 ? { x: remaining.x, y: remaining.y, left: imageOffset.x, top: imageOffset.y } : null
     if (pointers.current.size === 0) setManipulatingImage(false)
   }
-  return <div ref={overlayRef} className="preview-overlay" role="dialog" aria-modal="true" aria-label={`${de.uiVorschauFur} ${entry.name}`} tabIndex={-1} onClick={onClose}><div className="preview-topbar" onClick={(event) => event.stopPropagation()}><button className="preview-close" onClick={onClose} aria-label={de.close}><X /></button><div className="preview-file-title"><strong>{entry.name}</strong><span>{entry.extension.toUpperCase()} · {formatBytes(entry.size)}</span></div><button className="preview-more" onClick={(event) => onProperties(event.currentTarget)} aria-label={de.properties}><MoreHorizontal /></button></div><div className={`preview-stage preview-${kind}`} onClick={(event) => event.stopPropagation()}>
+  return <div ref={overlayRef} className="preview-overlay" role="dialog" aria-modal="true" aria-label={`${de.uiVorschauFur} ${entry.name}`} tabIndex={-1} onClick={onClose}><div className="preview-topbar" onClick={(event) => event.stopPropagation()}><button className="preview-close" onClick={onClose} aria-label={de.close}><X /></button><div className="preview-file-title"><strong>{entry.name}</strong><span>{entry.extension.toUpperCase()} · {formatBytes(entry.size)}</span></div><button className="preview-more" onClick={(event) => onProperties(event.currentTarget)} aria-label={de.properties}><MoreHorizontal /></button></div><div className={`preview-stage preview-${kind}${isPdf ? ' preview-pdf' : ''}`} onClick={(event) => event.stopPropagation()}>
     {kind === 'image' && <><img ref={imageRef} src={source} alt={de.imageHelp(entry.name)} className={manipulatingImage ? 'image-manipulating' : undefined} style={{ transform: `translate3d(${imageOffset.x}px, ${imageOffset.y}px, 0) scale(${zoom})` }} onPointerDown={handleImagePointerDown} onPointerMove={handleImagePointerMove} onPointerUp={finishImagePointer} onPointerCancel={finishImagePointer} onLostPointerCapture={finishImagePointer} onDoubleClick={() => { setImageOffset({ x: 0, y: 0 }); setImageZoom(zoom === 1 ? 2 : 1) }} /><div className="zoom-controls"><button onClick={() => setImageZoom(zoom - 0.25)} aria-label={de.uiVerkleinern}>−</button><span>{Math.round(zoom * 100)}%</span><button onClick={() => setImageZoom(zoom + 0.25)} aria-label={de.uiVergrossern}>+</button></div></>}
     {kind === 'video' && <video src={source} controls playsInline preload="metadata" aria-label={entry.name} />}
     {kind === 'audio' && <div className="audio-preview"><span className="audio-disc"><AudioLines size={46} /></span><strong>{entry.name}</strong><span>{formatBytes(entry.size)}</span><audio src={source} controls preload="metadata" aria-label={entry.name} /></div>}
-    {entry.extension === 'pdf' && <iframe src={`${source}#toolbar=0`} title={entry.name} />}
+    {isPdf && <PdfPreviewBoundary source={source}><Suspense fallback={<div role="status">{de.pdfLoading}</div>}><PdfViewer source={source} name={entry.name} /></Suspense></PdfPreviewBoundary>}
     {kind === 'code' && (text === null || (isMarkdown && markdownLoading) ? <div className="code-preview markdown-loading" role="status" aria-label={de.loading}><LoaderCircle size={22} className="spin" /></div> : isMarkdown ? <article className="markdown-preview" dangerouslySetInnerHTML={{ __html: markdownContent }} /> : <div className="code-preview"><pre><code className="hljs" dangerouslySetInnerHTML={{ __html: highlighted }} /></pre></div>)}
-    {kind === 'document' && entry.extension !== 'pdf' && <div className="unsupported-preview"><FileText size={42} /><strong>{de.uiVorschauFur}{' '}{entry.extension.toUpperCase()} {' '}{de.uiIstNichtVerfugbar}</strong><span>{de.uiLadeDieDateiHerunterUmSieInEinerPassendenAppZuOffnen}</span><button className="primary-button" onClick={onDownload}><Download size={16} /> {' '}{de.uiDateiLaden}</button></div>}
+    {kind === 'document' && !isPdf && <div className="unsupported-preview"><FileText size={42} /><strong>{de.uiVorschauFur}{' '}{entry.extension.toUpperCase()} {' '}{de.uiIstNichtVerfugbar}</strong><span>{de.uiLadeDieDateiHerunterUmSieInEinerPassendenAppZuOffnen}</span><button className="primary-button" onClick={onDownload}><Download size={16} /> {' '}{de.uiDateiLaden}</button></div>}
     {kind === 'archive' && <div className="unsupported-preview"><FileArchive size={42} /><strong>{de.uiArchivdatei}</strong><span>{de.uiEigenschaftenAnzeigenOderDateiLaden}</span><button className="primary-button" onClick={onDownload}><Download size={16} /> {' '}{de.uiArchivLaden}</button></div>}
     {kind === 'file' && <div className="unsupported-preview"><File size={42} /><strong>{de.uiKeineVorschauVerfugbar}</strong><span>{de.uiDuKannstDieDateiHerunterladenUndAufDemIPhoneOffnen}</span><button className="primary-button" onClick={onDownload}><Download size={16} /> {' '}{de.uiDateiLaden}</button></div>}
     {error && <div className="preview-error"><CircleAlert size={17} />{error}</div>}

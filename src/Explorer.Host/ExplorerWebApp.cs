@@ -81,7 +81,7 @@ public static class ExplorerWebApp
             context.Response.Headers["Referrer-Policy"] = "no-referrer";
             context.Response.Headers["X-Frame-Options"] = "DENY";
             context.Response.Headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()";
-            context.Response.Headers["Content-Security-Policy"] = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' blob:; connect-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'";
+            context.Response.Headers["Content-Security-Policy"] = "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; font-src 'self' blob: data:; worker-src 'self'; img-src 'self' data: blob:; media-src 'self' blob:; connect-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'";
 
             if (IsWriteMethod(context.Request.Method))
             {
@@ -100,7 +100,13 @@ public static class ExplorerWebApp
         app.UseMiddleware<TailscaleIdentityMiddleware>();
         app.UseMiddleware<PinProtectionMiddleware>();
         app.UseDefaultFiles();
-        app.UseStaticFiles();
+        var staticTypes = new FileExtensionContentTypeProvider();
+        staticTypes.Mappings[".mjs"] = "text/javascript";
+        staticTypes.Mappings[".bcmap"] = "application/octet-stream";
+        staticTypes.Mappings[".pfb"] = "application/octet-stream";
+        staticTypes.Mappings[".icc"] = "application/octet-stream";
+        staticTypes.Mappings[".wasm"] = "application/wasm";
+        app.UseStaticFiles(new StaticFileOptions { ContentTypeProvider = staticTypes });
 
         PinEndpoints.MapRoutes(app);
         app.MapGet("/api/v1/health", (HttpContext context) => Results.Ok(new

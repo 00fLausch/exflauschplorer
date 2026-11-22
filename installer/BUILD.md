@@ -1,6 +1,6 @@
 # Windows-Pakete bauen
 
-Benötigt werden Windows x64, Node.js/npm, Python 3, das .NET-10-SDK und Inno Setup 6. Im Projektordner:
+Benötigt werden Windows x64, Node.js 22.13 oder neuer und npm, Python 3, das .NET-10-SDK und Inno Setup 6. Im Projektordner:
 
 ```powershell
 Push-Location src/Explorer.Web
