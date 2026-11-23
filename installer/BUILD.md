@@ -1,6 +1,6 @@
-# Windows-Pakete bauen
+# Build Windows packages
 
-Benötigt werden Windows x64, Node.js 22.13 oder neuer und npm, Python 3, das .NET-10-SDK und Inno Setup 6. Im Projektordner:
+Requires Windows x64, Node.js 22.13 or newer and npm, Python 3, the .NET 10 SDK, and Inno Setup 6. In the project folder:
 
 ```powershell
 Push-Location src/Explorer.Web
@@ -12,8 +12,8 @@ python installer/build-zip.py
 & "$env:LOCALAPPDATA\Programs\Inno Setup 6\ISCC.exe" installer/EXfLauschPLORER.iss
 ```
 
-Falls Inno Setup an einem anderen Ort installiert ist, den Pfad zu `ISCC.exe` entsprechend ändern. Die Pakete liegen anschließend unter `artifacts/`. Die ZIP-Variante enthält den gleichen Einrichtungsdialog und installiert für den aktuellen Benutzer; sie ist keine eigenständige portable Version. Nur der EXE-Installer registriert sich in Windows unter „Installierte Apps“.
+If Inno Setup is installed elsewhere, change the path to `ISCC.exe` accordingly. The packages are then under `artifacts/`. The ZIP variant contains the same setup dialog and installs for the current user; it is not a standalone portable version. Only the EXE installer registers itself in Windows under “Installed apps”.
 
-Release-Builds deaktivieren Debugsymbole über `Directory.Build.props`, damit die verteilten DLLs keine lokalen PDB-Pfade des Build-Rechners enthalten.
+Release builds disable debug symbols via `Directory.Build.props` so the distributed DLLs do not contain local PDB paths from the build machine.
 
-Die Oberfläche für Dokumentationsbilder lässt sich mit `node scripts/capture-demo.mjs` in `src/Explorer.Web` starten. Das Skript verwendet ausschließlich synthetische API-Antworten und benötigt Google Chrome sowie optional FFmpeg für die Audiodemo.
+The UI for documentation images can be started with `node scripts/capture-demo.mjs` in `src/Explorer.Web`. The script uses only synthetic API responses and requires Google Chrome plus, optionally, FFmpeg for the audio demo.
