@@ -65,7 +65,7 @@ public sealed class WindowsShellRecycleBinTests
             {
                 entry = (await service.ListAsync(CancellationToken.None))
                     .SingleOrDefault(item =>
-                        string.Equals(item.OriginalPath, root, StringComparison.OrdinalIgnoreCase) &&
+                        string.Equals(item.OriginalPath, path, StringComparison.OrdinalIgnoreCase) &&
                         string.Equals(item.Name, Path.GetFileName(path), StringComparison.OrdinalIgnoreCase));
                 if (entry is not null) break;
                 await Task.Delay(100);
@@ -109,6 +109,35 @@ public sealed class WindowsShellRecycleBinTests
 
             if (File.Exists(path)) File.Delete(path);
             if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task PermanentlyDeleteOneSyntheticEntryFromTheWindowsRecycleBin()
+    {
+        var root = Path.Combine(Path.GetTempPath(), $"WME-RecyclePurge-Test-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(root);
+        var path = Path.Combine(root, "synthetische-pruefdatei.txt");
+        var service = new ShellRecycleBinService();
+        try
+        {
+            await File.WriteAllTextAsync(path, "A synthetic recycle-bin regression fixture.");
+            await service.DeleteAsync(path, CancellationToken.None);
+            var entry = Assert.Single(await service.ListAsync(CancellationToken.None), item =>
+                string.Equals(item.OriginalPath, path, StringComparison.OrdinalIgnoreCase));
+            using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+            await service.DeletePermanentlyAsync(entry.Id, deadline.Token);
+            Assert.DoesNotContain(await service.ListAsync(CancellationToken.None), item => item.Id == entry.Id);
+        }
+        finally
+        {
+            if (!File.Exists(path))
+            {
+                try { await service.RestoreOriginalPathAsync(path, CancellationToken.None); }
+                catch (FileNotFoundException) { }
+            }
+            if (File.Exists(path)) File.Delete(path);
+            Directory.Delete(root);
         }
     }
 

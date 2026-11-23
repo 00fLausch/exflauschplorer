@@ -10,56 +10,48 @@ if (-not (Test-Path -LiteralPath $settingsPath)) {
 }
 
 $settings = Get-Content -Raw -LiteralPath $settingsPath | ConvertFrom-Json
-if (-not $settings.ShareAllDrives) {
-    throw 'Dieser lokale Test benötigt eine Freigabe, die %TEMP% umfasst.'
-}
-
-$login = @($settings.AllowedLogins)[0]
-if ([string]::IsNullOrWhiteSpace($login)) {
-    throw 'In der Konfiguration ist kein erlaubter Tailscale-Login eingetragen.'
-}
-
-$loopbackBaseUrl = "http://127.0.0.1:$($settings.Port)"
 if ([string]::IsNullOrWhiteSpace($BaseUrl)) {
-    $BaseUrl = $loopbackBaseUrl
+    if ([string]::IsNullOrWhiteSpace($settings.TailscaleHostName)) {
+        throw 'Fuehre die Einrichtung erneut aus oder gib die MagicDNS-HTTPS-Adresse mit BaseUrl an.'
+    }
+    $BaseUrl = ([UriBuilder]::new('https', [string]$settings.TailscaleHostName, [int]$settings.TailscaleHttpsPort)).Uri.AbsoluteUri
 }
 $baseUri = [Uri]$BaseUrl
-$isLoopback = $baseUri.Scheme -eq 'http' -and
-    $baseUri.Host -eq '127.0.0.1' -and
-    $baseUri.Port -eq $settings.Port -and
-    $baseUri.AbsolutePath -eq '/' -and
-    [string]::IsNullOrEmpty($baseUri.Query)
-$isServe = $baseUri.Scheme -eq 'https' -and
-    $baseUri.DnsSafeHost.EndsWith('.ts.net', [StringComparison]::OrdinalIgnoreCase) -and
-    $baseUri.AbsolutePath -eq '/' -and
-    [string]::IsNullOrEmpty($baseUri.Query)
-if (-not ($isLoopback -or $isServe)) {
-    throw 'BaseUrl darf nur die konfigurierte Loopback-Adresse oder eine HTTPS-.ts.net-Adresse sein.'
+if (-not $baseUri.IsAbsoluteUri -or $baseUri.Scheme -ne 'https' -or
+    -not $baseUri.DnsSafeHost.EndsWith('.ts.net', [StringComparison]::OrdinalIgnoreCase) -or
+    $baseUri.AbsolutePath -ne '/' -or $baseUri.Query -or $baseUri.Fragment -or $baseUri.UserInfo) {
+    throw 'BaseUrl muss eine reine MagicDNS-HTTPS-Adresse sein.'
 }
-if ($isServe) {
-    if ($baseUri.Port -ne $settings.TailscaleHttpsPort) {
-        throw 'Der HTTPS-Port in BaseUrl stimmt nicht mit TailscaleHttpsPort der lokalen App-Konfiguration überein.'
-    }
-    $tailscaleExe = (Get-Command tailscale.exe -ErrorAction SilentlyContinue).Source
-    if ([string]::IsNullOrWhiteSpace($tailscaleExe)) {
-        $tailscalePath = Join-Path $env:ProgramFiles 'Tailscale\tailscale.exe'
-        if (Test-Path -LiteralPath $tailscalePath) { $tailscaleExe = $tailscalePath }
-    }
-    if ([string]::IsNullOrWhiteSpace($tailscaleExe)) { throw 'Tailscale wurde nicht gefunden; die Serve-Zieladresse kann nicht gegen diesen PC geprüft werden.' }
-    $statusJson = & $tailscaleExe status --json 2>$null
-    if ($LASTEXITCODE -ne 0) { throw 'Tailscale antwortet nicht; die Serve-Zieladresse kann nicht geprüft werden.' }
-    $status = ($statusJson -join "`n") | ConvertFrom-Json
-    $localDnsName = ([string]$status.Self.DNSName).TrimEnd('.')
-    if ([string]::IsNullOrWhiteSpace($localDnsName) -or
-        -not [string]::Equals($baseUri.DnsSafeHost, $localDnsName, [StringComparison]::OrdinalIgnoreCase)) {
-        throw 'BaseUrl muss exakt auf den MagicDNS-Namen dieses PCs zeigen, damit kein lokaler Pfad an ein fremdes Gerät gesendet wird.'
-    }
+if ($baseUri.Port -ne $settings.TailscaleHttpsPort) {
+    throw 'Der HTTPS-Port in BaseUrl stimmt nicht mit der lokalen App-Konfiguration ueberein.'
+}
+
+$tailscaleExe = (Get-Command tailscale.exe -ErrorAction SilentlyContinue).Source
+if ([string]::IsNullOrWhiteSpace($tailscaleExe)) {
+    $tailscalePath = Join-Path $env:ProgramFiles 'Tailscale\tailscale.exe'
+    if (Test-Path -LiteralPath $tailscalePath) { $tailscaleExe = $tailscalePath }
+}
+if ([string]::IsNullOrWhiteSpace($tailscaleExe)) { throw 'Tailscale wurde nicht gefunden.' }
+$statusJson = & $tailscaleExe status --json 2>$null
+if ($LASTEXITCODE -ne 0) { throw 'Tailscale antwortet nicht.' }
+$status = ($statusJson -join "`n") | ConvertFrom-Json
+$localDnsName = ([string]$status.Self.DNSName).TrimEnd('.')
+if (-not [string]::Equals($baseUri.DnsSafeHost, $localDnsName, [StringComparison]::OrdinalIgnoreCase)) {
+    throw 'BaseUrl muss exakt auf den MagicDNS-Namen dieses PCs zeigen, damit kein lokaler Pfad an ein fremdes Geraet gesendet wird.'
+}
+if ($settings.PinHash) {
+    throw 'Das Range-Testskript braucht eine Testinstallation ohne PIN oder eine authentifizierte Browserpruefung.'
 }
 
 $temporaryRoot = [IO.Path]::GetFullPath($env:TEMP).TrimEnd('\') + '\'
 $testDirectory = [IO.Path]::GetFullPath((Join-Path $env:TEMP ("WME-RangeProbe-" + [Guid]::NewGuid().ToString('N'))))
 if (-not $testDirectory.StartsWith($temporaryRoot, [StringComparison]::OrdinalIgnoreCase)) {
     throw 'Der Testordner liegt nicht innerhalb von %TEMP%.'
+}
+if (-not $settings.ShareAllDrives -and -not @($settings.Roots | Where-Object {
+    $_.Path -and $temporaryRoot.StartsWith([IO.Path]::GetFullPath($_.Path).TrimEnd('\') + '\', [StringComparison]::OrdinalIgnoreCase)
+}).Count) {
+    throw 'Dieser Test braucht eine Freigabe, die %TEMP% umfasst.'
 }
 
 $videoPath = Join-Path $testDirectory 'sparse-video.mp4'
@@ -101,12 +93,12 @@ try {
     $checks = foreach ($range in $ranges) {
         $request = [System.Net.Http.HttpRequestMessage]::new([System.Net.Http.HttpMethod]::Get, $url)
         try {
-            if ($isLoopback) {
-                $request.Headers.Add('Tailscale-User-Login', $login)
-            }
             $request.Headers.Range = [System.Net.Http.Headers.RangeHeaderValue]::new([Nullable[long]]$range.Start, [Nullable[long]]$range.End)
-            $response = $client.SendAsync($request).GetAwaiter().GetResult()
+            $response = $client.SendAsync($request, [System.Net.Http.HttpCompletionOption]::ResponseHeadersRead).GetAwaiter().GetResult()
             try {
+                if ($response.StatusCode -ne [System.Net.HttpStatusCode]::PartialContent -or $response.Content.Headers.ContentLength -ne 4) {
+                    throw "Die Range-Anfrage lieferte keine vier Bytes (HTTP $([int]$response.StatusCode))."
+                }
                 $body = [Text.Encoding]::ASCII.GetString($response.Content.ReadAsByteArrayAsync().GetAwaiter().GetResult())
                 $contentRange = $response.Content.Headers.ContentRange
                 [pscustomobject]@{
@@ -133,8 +125,7 @@ try {
         SparseFile = $true
         InitialRange = $checks[0].Valid
         FinalRange = $checks[1].Valid
-        Transport = if ($isServe) { 'Tailscale HTTPS Serve' } else { 'Loopback' }
-        LocalOnly = $isLoopback
+        Transport = 'Tailscale HTTPS Serve'
     } | ConvertTo-Json -Compress
 }
 finally {

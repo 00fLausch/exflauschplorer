@@ -11,7 +11,8 @@ namespace Explorer.Host.Services;
 public sealed class ShellThumbnailService(PathAccessPolicy policy)
 {
     private static readonly Guid ImageFactoryId = new("BCC18B79-BA16-442F-80C4-8A59C30C463B");
-    private readonly SemaphoreSlim _generationLock = new(1, 1);
+    private readonly SemaphoreSlim _generationSlots = new(2, 2);
+    private readonly object _cacheTrim = new();
     private static string CacheDirectory => Path.Combine(SettingsStore.DataDirectory, "thumbnails");
 
     public async Task<string> GetThumbnailPathAsync(string path, int size, CancellationToken cancellationToken)
@@ -24,19 +25,53 @@ public sealed class ShellThumbnailService(PathAccessPolicy policy)
         var key = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(keyText)));
         Directory.CreateDirectory(CacheDirectory);
         var destination = Path.Combine(CacheDirectory, key + ".png");
-        if (File.Exists(destination)) return destination;
+        if (TryTouchCached(destination)) return destination;
 
-        await _generationLock.WaitAsync(cancellationToken);
+        if (!await _generationSlots.WaitAsync(TimeSpan.FromSeconds(10), cancellationToken))
+            throw new TimeoutException("Die Windows-Vorschaubilddienste antworten nicht rechtzeitig.");
+        // A blocked Shell handler cannot be interrupted safely. Keep its worker slot reserved.
+        var generation = GenerateAsync(authorized, size, destination);
+        return await generation.WaitAsync(TimeSpan.FromSeconds(15), cancellationToken);
+    }
+
+    private async Task<string> GenerateAsync(string path, int size, string destination)
+    {
+        string? temporary = null;
         try
         {
-            if (File.Exists(destination)) return destination;
-            var bytes = await Task.Run(() => CreateThumbnail(authorized, size), cancellationToken);
-            await File.WriteAllBytesAsync(destination + ".tmp", bytes, cancellationToken);
-            File.Move(destination + ".tmp", destination, overwrite: true);
-            TrimCacheIfNeeded();
+            if (TryTouchCached(destination)) return destination;
+            var completion = new TaskCompletionSource<byte[]>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var worker = new Thread(() =>
+            {
+                try { completion.SetResult(CreateThumbnail(path, size)); }
+                catch (Exception exception) { completion.SetException(exception); }
+            }) { IsBackground = true };
+            worker.SetApartmentState(ApartmentState.STA);
+            worker.Start();
+            var bytes = await completion.Task;
+            temporary = destination + "." + Guid.NewGuid().ToString("N") + ".tmp";
+            await File.WriteAllBytesAsync(temporary, bytes);
+            File.Move(temporary, destination, overwrite: true);
+            lock (_cacheTrim) TrimCacheIfNeeded();
             return destination;
         }
-        finally { _generationLock.Release(); }
+        finally
+        {
+            try { if (temporary is not null && File.Exists(temporary)) File.Delete(temporary); } catch (IOException) { }
+            _generationSlots.Release();
+        }
+    }
+
+    private static bool TryTouchCached(string path)
+    {
+        if (!File.Exists(path)) return false;
+        try
+        {
+            var now = DateTime.UtcNow;
+            if (now - File.GetLastWriteTimeUtc(path) > TimeSpan.FromHours(1)) File.SetLastWriteTimeUtc(path, now);
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException) { }
+        return true;
     }
 
     private static byte[] CreateThumbnail(string path, int size)
@@ -67,7 +102,7 @@ public sealed class ShellThumbnailService(PathAccessPolicy policy)
     {
         try
         {
-            var files = new DirectoryInfo(CacheDirectory).GetFiles("*.png").OrderByDescending(file => file.LastAccessTimeUtc).ToArray();
+            var files = new DirectoryInfo(CacheDirectory).GetFiles("*.png").OrderByDescending(file => file.LastWriteTimeUtc).ToArray();
             long bytes = 0;
             foreach (var file in files) bytes += file.Length;
             foreach (var file in files.Reverse())

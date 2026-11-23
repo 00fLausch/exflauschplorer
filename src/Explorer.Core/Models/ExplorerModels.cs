@@ -46,7 +46,7 @@ public sealed record UploadSessionDto(string Id, string FileName, string Destina
 
 public sealed record UploadChunkDto(string Id, long Offset, bool Complete);
 
-public sealed record UploadCommitRequest(string? ConflictMode = null);
+public sealed record UploadCommitRequest(string? ConflictMode = null, string? ExpectedSha256 = null);
 
 public sealed record UploadCommitDto(bool Completed, bool Skipped, string? Path, string Sha256);
 

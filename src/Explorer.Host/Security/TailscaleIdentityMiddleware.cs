@@ -7,9 +7,9 @@ namespace Explorer.Host.Security;
 
 public sealed class TailscaleIdentityMiddleware(RequestDelegate next, ILogger<TailscaleIdentityMiddleware> logger)
 {
-    public async Task InvokeAsync(HttpContext context, ExplorerSettings settings, IWebHostEnvironment environment)
+    public async Task InvokeAsync(HttpContext context, ExplorerSettings settings, ExplorerRequestTrust trust)
     {
-        if (environment.IsDevelopment())
+        if (trust.IsolatedTest)
         {
             context.Items["Explorer.User"] = "development-local";
             await next(context);

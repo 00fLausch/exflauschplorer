@@ -20,7 +20,7 @@ public static class FolderWatchEndpoint
         context.Response.Headers.CacheControl = "no-cache, no-store";
         context.Response.Headers["X-Accel-Buffering"] = "no";
         context.Response.ContentType = "text/event-stream; charset=utf-8";
-        var channel = Channel.CreateBounded<object>(new BoundedChannelOptions(128)
+        var channel = Channel.CreateBounded<bool>(new BoundedChannelOptions(1)
         {
             FullMode = BoundedChannelFullMode.DropOldest,
             SingleReader = true,
@@ -33,18 +33,18 @@ public static class FolderWatchEndpoint
             NotifyFilter = NotifyFilters.FileName | NotifyFilters.DirectoryName | NotifyFilters.LastWrite | NotifyFilters.Size | NotifyFilters.Attributes,
             EnableRaisingEvents = true
         };
-        watcher.Created += (_, e) => { files.Invalidate(folder); channel.Writer.TryWrite(new { type = "created", name = e.Name }); };
-        watcher.Changed += (_, e) => { files.Invalidate(folder); channel.Writer.TryWrite(new { type = "changed", name = e.Name }); };
-        watcher.Deleted += (_, e) => { files.Invalidate(folder); channel.Writer.TryWrite(new { type = "deleted", name = e.Name }); };
-        watcher.Renamed += (_, e) => { files.Invalidate(folder); channel.Writer.TryWrite(new { type = "renamed", name = e.Name, oldName = e.OldName }); };
-        watcher.Error += (_, _) => { files.Invalidate(folder); channel.Writer.TryWrite(new { type = "refresh" }); };
+        watcher.Created += (_, _) => channel.Writer.TryWrite(true);
+        watcher.Changed += (_, _) => channel.Writer.TryWrite(true);
+        watcher.Deleted += (_, _) => channel.Writer.TryWrite(true);
+        watcher.Renamed += (_, _) => channel.Writer.TryWrite(true);
+        watcher.Error += (_, _) => channel.Writer.TryWrite(true);
 
         await WriteEvent(context, "ready", new { path = folder });
         while (!context.RequestAborted.IsCancellationRequested)
         {
             using var pending = CancellationTokenSource.CreateLinkedTokenSource(context.RequestAborted);
             var dataReady = channel.Reader.WaitToReadAsync(pending.Token).AsTask();
-            var heartbeat = Task.Delay(TimeSpan.FromSeconds(18), context.RequestAborted);
+            var heartbeat = Task.Delay(TimeSpan.FromSeconds(18), pending.Token);
             var finished = await Task.WhenAny(dataReady, heartbeat);
             if (finished == heartbeat)
             {
@@ -56,8 +56,12 @@ public static class FolderWatchEndpoint
             }
 
             if (!await dataReady) break;
-            while (channel.Reader.TryRead(out var message))
-                await WriteEvent(context, "change", message);
+            pending.Cancel();
+            await Task.Delay(TimeSpan.FromMilliseconds(350), context.RequestAborted);
+            _ = channel.Reader.TryRead(out _);
+            if (!files.Policy.IsAllowed(path)) return;
+            files.Invalidate(folder);
+            await WriteEvent(context, "change", new { type = "refresh" });
         }
     }
 

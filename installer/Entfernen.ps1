@@ -10,9 +10,18 @@ try {
         $login = @($settings.allowedLogins)[0]
         if (-not $login) { throw 'Die laufende App konnte nicht auf aktive Vorgänge geprüft werden. Bitte zuerst über das Symbol im Infobereich beenden.' }
         $headers = @{ 'Tailscale-User-Login' = [string]$login }
-        $jobs = @(Invoke-RestMethod -Uri "http://127.0.0.1:$($settings.port)/api/v1/jobs" -Headers $headers -TimeoutSec 4)
-        $uploads = @(Invoke-RestMethod -Uri "http://127.0.0.1:$($settings.port)/api/v1/uploads" -Headers $headers -TimeoutSec 4)
-        if (@($jobs | Where-Object { $_.status -in @('queued','running','paused','conflict') }).Count -or @($uploads | Where-Object { $_.state -in @('uploading','ready') }).Count) {
+        if ($settings.localSetupToken) {
+            $activity = Invoke-RestMethod -Uri "http://127.0.0.1:$($settings.port)/api/v1/local-setup" -Headers @{ 'X-Explorer-Setup' = $settings.localSetupToken } -TimeoutSec 4
+            $activeJobs = [int]$activity.activeJobs
+            $activeUploads = [int]$activity.activeUploads
+        }
+        else {
+            $jobs = @(Invoke-RestMethod -Uri "http://127.0.0.1:$($settings.port)/api/v1/jobs" -Headers $headers -TimeoutSec 4)
+            $uploads = @(Invoke-RestMethod -Uri "http://127.0.0.1:$($settings.port)/api/v1/uploads" -Headers $headers -TimeoutSec 4)
+            $activeJobs = @($jobs | Where-Object { $_.status -in @('queued','running','paused','conflict') }).Count
+            $activeUploads = @($uploads | Where-Object { $_.state -in @('uploading','ready') }).Count
+        }
+        if ($activeJobs -gt 0 -or $activeUploads -gt 0) {
             throw 'Es sind noch Datei- oder Uploadvorgänge aktiv. Bitte zuerst abschließen und die Deinstallation erneut starten.'
         }
     }

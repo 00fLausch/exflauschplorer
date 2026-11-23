@@ -28,7 +28,7 @@ EXfLauschPLORER verbindet einen Windows-PC über dein privates Tailscale-Netz mi
 
 1. Lade den aktuellen **Windows-Installer** aus den [Releases](https://github.com/00fLausch/exflauschplorer/releases/latest) herunter und starte ihn als normaler Windows-Benutzer. Alternativ gibt es dort ein ZIP-Paket: vollständig entpacken und `ZIP-starten.cmd` öffnen.
 2. Der Einrichtungsdialog prüft, ob Tailscale installiert und verbunden ist. Falls nötig, führen die Links zur [Windows-Installation](https://tailscale.com/download/windows) und zur [Tailscale-Hilfe](https://tailscale.com/docs/install). Melde dich an und prüfe erneut.
-3. Wähle, ob alle Laufwerke oder zunächst dein Benutzerordner freigegeben werden, sowie Autostart und Absturzwächter. Vorhandene Freigaben bleiben bei unveränderter Auswahl erhalten. Die Dateifreigabe lässt sich später in den App-Einstellungen ändern.
+3. Wähle Freigaben, Autostart und Absturzwächter. Neue Installationen teilen standardmäßig den Benutzerordner. Vorhandene Freigaben bleiben bei unveränderter Auswahl erhalten. Weitere Änderungen nimmst du am Windows-PC über „Konfiguration öffnen“ im Infobereich vor.
 4. Starte die Einrichtung. Sie richtet den lokalen Dienst und Tailscale Serve ein und zeigt die persönliche HTTPS-Adresse an. Wenn Tailscale eine Freigabe für Serve verlangt, folge dem angezeigten Hinweis und starte die Einrichtung erneut. MagicDNS und HTTPS müssen im Tailnet verfügbar sein.
 
 Der Installer enthält die benötigte .NET-Laufzeit; Node.js und das .NET-SDK sind für die fertigen Pakete nicht nötig. Die App benötigt keine Administratorrechte und installiert sich für den aktuellen Windows-Benutzer. Tailscale selbst kann für seine Installation erhöhte Rechte benötigen.
@@ -47,7 +47,7 @@ Der PC muss eingeschaltet und angemeldet sein, und beide Geräte müssen Tailsca
 - Für die Audio-Wellenform werden **FFmpeg und FFprobe auf dem PC** benötigt. Ohne sie bleibt die normale Zeitleiste bedienbar. Mehr dazu im [technischen Handbuch](docs/manual.md).
 - Die PDF-Vorschau verwendet [Mozilla PDF.js](https://mozilla.github.io/pdf.js/) und stellt jeweils eine Seite dar. Ausfüllbare Formulare und Textauswahl werden in dieser Vorschau nicht unterstützt; zum Bearbeiten die Datei in einer passenden PDF-App öffnen.
 - Der Wächter startet die App nach einem unerwarteten Prozessabbruch erneut und begrenzt wiederholte Neustarts. Ein reguläres **Beenden** über das Tray-Menü bleibt ein Beenden; bei aktivem Autostart startet die App bei der nächsten Windows-Anmeldung erneut. Eine hängende, aber weiterhin laufende App erkennt der Wächter nicht.
-- Der Zugriff bleibt an die tatsächlichen Windows-Rechte gebunden. Systemordner sind standardmäßig zusätzlich geschützt; Freigaben und Schutz können in den Einstellungen überprüft werden.
+- Freigaben gelten innerhalb der Windows-Rechte des angemeldeten Benutzers. Browserprofile, Autostart, SSH-Schlüssel und der Datenordner der App sind für den Dateizugriff gesperrt. In der Web-App kannst du deine Freigaben ansehen.
 - Beim Deinstallieren werden Programm und Autostart entfernt. Einstellungen und eine bestehende Tailscale-Serve-Route bleiben erhalten; eine solche Route kann bei Bedarf in Tailscale separat entfernt werden.
 - Der Quellcode und die Releases sind öffentlich verfügbar. Der Zugriff auf eine laufende App erfolgt über das eigene Tailscale-Netz.
 

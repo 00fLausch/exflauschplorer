@@ -185,6 +185,7 @@ public sealed class FileExplorerService
         {
             cancellationToken.ThrowIfCancellationRequested();
             var name = Path.GetFileName(itemPath);
+            if (PathAccessPolicy.IsInternalEntryName(name)) continue;
             FileAttributes attributes;
             try { attributes = File.GetAttributes(itemPath); }
             catch (FileNotFoundException) { continue; }

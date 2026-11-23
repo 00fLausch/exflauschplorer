@@ -23,6 +23,7 @@ export interface ShareRootSetting {
 }
 
 export interface ExplorerShareSettings {
+  canEdit?: boolean
   shareAllDrives: boolean
   readOnlyMode: boolean
   protectSystemFolders: boolean

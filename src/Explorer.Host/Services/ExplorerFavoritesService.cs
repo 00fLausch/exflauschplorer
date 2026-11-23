@@ -67,6 +67,8 @@ public sealed class ExplorerFavoritesService
             {
                 Port = _settings.Port,
                 TailscaleHttpsPort = _settings.TailscaleHttpsPort,
+                TailscaleHostName = _settings.TailscaleHostName,
+                LocalSetupToken = _settings.LocalSetupToken,
                 AllowedLogins = [.. _settings.AllowedLogins],
                 ShareAllDrives = _settings.ShareAllDrives,
                 Roots = [.. _settings.Roots.Select(root => new ConfiguredRoot { Path = root.Path, ReadOnly = root.ReadOnly, Label = root.Label })],

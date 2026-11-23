@@ -16,11 +16,14 @@ internal static class Program
         }
         // The browser E2E harness uses an isolated profile, temp share and test recycle bin;
         // it must not create a tray icon or collide with the user's normal single-instance mutex.
-        if (Environment.GetEnvironmentVariable("WINDOWS_MOBILE_EXPLORER_E2E") == "1")
+#if DEBUG
+        if (args is ["--isolated-e2e"] &&
+            Environment.GetEnvironmentVariable("WINDOWS_MOBILE_EXPLORER_E2E") == "1")
         {
-            ExplorerWebApp.Build(SettingsStore.Load(), args).Run();
+            ExplorerWebApp.Build(SettingsStore.Load(), isolatedTest: true).Run();
             return;
         }
+#endif
 
         using var mutex = new Mutex(initiallyOwned: true, "Local\\WindowsMobileExplorer.Tray", out var createdNew);
         if (!createdNew) return;

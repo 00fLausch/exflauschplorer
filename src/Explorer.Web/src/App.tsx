@@ -6,7 +6,7 @@ import {
   FileText, Film, Folder, FolderOpen, HardDrive, Heart, Info, List, LockKeyhole, LoaderCircle,
   MoreHorizontal, Music2, PanelTop, Pin, RefreshCw, Search, Settings2, Share2, SlidersHorizontal,
   Smartphone, SortAsc, TableProperties, X, Scissors, Trash2, PenLine, FolderPlus, FilePlus2, Sparkles,
-  Undo2, Pause, Play, Square, ExternalLink, ClipboardPaste, MoveRight, ChevronUp, Upload, Menu,
+  Undo2, Pause, Play, Square, ClipboardPaste, MoveRight, ChevronUp, Upload, Menu,
 } from 'lucide-react'
 import { ApiException, explorerApi, formatBytes, formatDate } from './api'
 import { de } from './locales/de'
@@ -56,7 +56,13 @@ const FILE_TEMPLATES: Record<FileTemplate, { label: string; extension: string }>
 }
 
 function getRecent(): FileEntry[] {
-  try { return JSON.parse(localStorage.getItem(RECENT_KEY) ?? '[]') as FileEntry[] } catch { return [] }
+  try {
+    const value: unknown = JSON.parse(localStorage.getItem(RECENT_KEY) ?? '[]')
+    if (!Array.isArray(value)) return []
+    return value.filter((entry): entry is FileEntry => entry !== null && typeof entry === 'object' &&
+      typeof entry.name === 'string' && typeof entry.path === 'string' && typeof entry.extension === 'string' &&
+      typeof entry.modified === 'string' && typeof entry.contentType === 'string' && typeof entry.isDirectory === 'boolean')
+  } catch { return [] }
 }
 
 function getLegacyFavorites(): string[] | null {
@@ -389,6 +395,7 @@ function App() {
   const uploadInputRef = useRef<HTMLInputElement>(null)
   const resumeUploadId = useRef<string | null>(null)
   const restoreLocationAttempted = useRef(false)
+  const navigationLocked = useRef(false)
   const appShellRef = useRef<HTMLDivElement>(null)
   const navigationToggleRef = useRef<HTMLButtonElement>(null)
   const moreReturnPageRef = useRef<MainPage>('files')
@@ -613,6 +620,32 @@ function App() {
   }, [mainPage, pinChecked, pinStatus, refreshKey])
   useEffect(() => {
     const handlePinLocked = () => {
+      navigationLocked.current = true
+      requestRef.current?.abort()
+      searchAbortRef.current?.abort()
+      selectAllController.current?.abort()
+      activeUploadControllers.current.forEach((controller) => controller.abort())
+      try {
+        localStorage.removeItem(RECENT_KEY)
+        localStorage.removeItem(LAST_PATH_KEY)
+        localStorage.removeItem(FOLDER_HISTORY_KEY)
+        for (let index = localStorage.length - 1; index >= 0; index--) {
+          const key = localStorage.key(index)
+          if (key?.startsWith(UPLOAD_STORAGE_PREFIX)) localStorage.removeItem(key)
+        }
+      } catch { /* browser storage may be unavailable */ }
+      window.history.replaceState({ explorerPath: null, explorerIndex: 0 }, '', location.pathname)
+      setRecent([])
+      setClipboard(null)
+      setEditorContent('')
+      setPreviewText(null)
+      setSelected([])
+      setQuery('')
+      setNavigationOpen(false)
+      setContextMenu(null)
+      setFavorites([])
+      setUploadConflict(null)
+      setSelectedUploadFiles([])
       setPinStatus((current) => current?.isConfigured ? { ...current, isUnlocked: false } : current)
       setPinChecked(true)
       setCurrentPath(null)
@@ -656,6 +689,11 @@ function App() {
         if (locallyStartedJobs.current.has(job.id)) showUndoToast(job)
       } catch { /* ignore malformed event payloads */ }
     })
+    events.onerror = () => {
+      void explorerApi.pinStatus().then((status) => {
+        if (active && status.isConfigured && !status.isUnlocked) window.dispatchEvent(new Event('explorer:pin-locked'))
+      }).catch(() => { /* connectivity is checked independently */ })
+    }
     return () => { active = false; events.close() }
   }, [pinChecked, pinStatus, showUndoToast])
   useEffect(() => {
@@ -723,7 +761,11 @@ function App() {
     return () => window.removeEventListener('resize', onResize)
   }, [])
   useEffect(() => {
+    if (pinChecked && pinStatus && (!pinStatus.isConfigured || pinStatus.isUnlocked)) navigationLocked.current = false
+  }, [pinChecked, pinStatus])
+  useEffect(() => {
     const onPop = () => {
+      if (navigationLocked.current) return
       const state = window.history.state as { explorerPath?: string | null } | null
       if (state && 'explorerPath' in state) {
         const path = state.explorerPath ?? null
@@ -1430,9 +1472,8 @@ function App() {
         if (name?.trim()) await startJob({ kind: action, sources: [], destination: currentPath, newName: name.trim() })
         return
       }
-      case 'open-pc':
       case 'show-in-explorer':
-        try { await explorerApi.openOnPc(entry.path, action === 'show-in-explorer'); notify(action === 'open-pc' ? de.uiDateiWirdAufDemPCGeoffnet : de.uiExplorerWurdeAmSpeicherortGeoffnet) }
+        try { await explorerApi.openOnPc(entry.path, true); notify(de.uiExplorerWurdeAmSpeicherortGeoffnet) }
         catch (cause) { notify(cause instanceof Error ? cause.message : de.uiDieDateiKannAmPCNichtGeoffnetWerden) }
         return
       case 'select': setSelected(paths); setSelectionMode(true); return
@@ -1472,9 +1513,27 @@ function App() {
       try { localStorage.setItem(uploadStorageKey(destination, file), session.id) } catch { /* Server-side sessions remain available from the transfers page. */ }
       let offset = session.offset
       const chunkSize = 8 * 1024 * 1024
+      const { sha256 } = await import('@noble/hashes/sha2.js')
+      let fileHash = sha256.create()
+      let hashedBytes = 0
+      const catchUpHash = async (end: number) => {
+        if (end < hashedBytes) {
+          fileHash.destroy()
+          fileHash = sha256.create()
+          hashedBytes = 0
+        }
+        while (hashedBytes < end) {
+          controller.signal.throwIfAborted()
+          const next = Math.min(end, hashedBytes + chunkSize)
+          fileHash.update(new Uint8Array(await file.slice(hashedBytes, next).arrayBuffer()))
+          hashedBytes = next
+        }
+      }
       while (offset < file.size) {
+        await catchUpHash(offset)
         const chunk = file.slice(offset, Math.min(file.size, offset + chunkSize))
-        const digest = await crypto.subtle.digest(de.uiSHA256, await chunk.arrayBuffer())
+        const bytes = new Uint8Array(await chunk.arrayBuffer())
+        const digest = await crypto.subtle.digest(de.uiSHA256, bytes)
         const checksum = Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, '0')).join('')
         let result: Awaited<ReturnType<typeof explorerApi.uploadChunk>>
         try {
@@ -1499,12 +1558,17 @@ function App() {
           setReconnectingUploadIds((current) => current.filter((id) => id !== session!.id))
           continue
         }
-        offset = result.offset
+        if (result.offset !== offset + bytes.byteLength) throw new Error(de.uiDerUploadWurdeUnterbrochenUndKannFortgesetztWerden)
+        fileHash.update(bytes)
+        offset = hashedBytes = result.offset
         session = { ...session, offset, state: result.complete ? 'ready' : 'uploading' }
         setUploads((current) => [session!, ...current.filter((item) => item.id !== session!.id)])
       }
       try {
-        const committed = await explorerApi.commitUpload(session.id)
+        await catchUpHash(file.size)
+        controller.signal.throwIfAborted()
+        const fullChecksum = Array.from(fileHash.digest(), (byte) => byte.toString(16).padStart(2, '0')).join('')
+        const committed = await explorerApi.commitUpload(session.id, undefined, fullChecksum, controller.signal)
         if (committed.completed) {
           setUploads((current) => current.filter((item) => item.id !== session!.id))
           forgetUploadId(session.id)
@@ -1635,23 +1699,7 @@ function App() {
   const lockApp = async () => {
     try {
       await explorerApi.lockPin()
-      setPinStatus((current) => current ? { ...current, isUnlocked: false } : current)
-      setCurrentPath(null)
-      setNavigationOpen(false)
-      mediaFolderController.current?.abort()
-      setMediaQueue([])
-      setHistory([null])
-      setHistoryIndex(0)
-      setEntries([])
-      setDrives([])
-      setKnownFolders([])
-      setQuickAccessFolders([])
-      setPreview(null)
-      setEditorDocument(null)
-      setProperties(null)
-      setJobs([])
-      setRecycleEntries([])
-      setUploads([])
+      window.dispatchEvent(new Event('explorer:pin-locked'))
     } catch (cause) { notify(cause instanceof Error ? cause.message : de.uiDieAppKonnteNichtGesperrtWerden) }
   }
 
@@ -2027,7 +2075,6 @@ function ActionSheet({ entry, favorite, hasClipboard, onClose, onAction }: { ent
     {button('rename', <PenLine />, de.rename)}
     {button('zip', <Archive />, de.uiZIPErstellen)}
     {isArchive && button('unzip', <FileArchive />, de.uiEntpacken)}
-    {button('open-pc', <ExternalLink />, de.uiAufPCOffnen)}
     {button('show-in-explorer', <FolderOpen />, de.uiImExplorerZeigen)}
     {isEditableText && button('edit', <PenLine />, de.uiTextBearbeiten)}
     {button('permanent-delete', <Trash2 />, de.uiEndgultigLoschen)}
@@ -2042,7 +2089,7 @@ function PreviewModal({ entry, text, error, zoom, onZoom, returnFocusTarget, onC
   const kind = fileKind(entry)
   const isMarkdown = ['md', 'markdown'].includes(entry.extension.toLowerCase())
   const isPdf = entry.extension.toLowerCase() === 'pdf'
-  const source = explorerApi.streamUrl(entry)
+  const source = entry.extension.toLowerCase() === 'svg' ? explorerApi.thumbnailUrl(entry.path, 1024) : explorerApi.streamUrl(entry)
   const overlayRef = useModalDialogFocus<HTMLDivElement>(onClose, returnFocusTarget)
   const imageRef = useRef<HTMLImageElement>(null)
   const pointers = useRef(new Map<number, { x: number; y: number }>())
@@ -2232,10 +2279,14 @@ function SettingsSheet({
 
       <section className="share-settings-section" aria-labelledby="share-settings-heading">
         <h3 id="share-settings-heading">{de.uiFreigabeEinstellungen}</h3>
-        <p className="share-settings-intro">{de.uiFreigabenWirkenSofortUndBleibenAufDemPCGespeichert}</p>
+        <p className="share-settings-intro">{draft?.canEdit ? de.uiFreigabenWirkenSofortUndBleibenAufDemPCGespeichert : de.uiFreigabenLokalAendern}</p>
         {loading && <div className="loading-panel" role="status"><LoaderCircle className="spin" size={18} />{' '}{de.uiFreigabeEinstellungenWerdenGeladen}</div>}
         {error && <div className="property-error" role="alert">{error}</div>}
-        {!loading && draft && <>
+        {!loading && draft && !draft.canEdit && <ul className="share-root-list">
+          <li>{draft.shareAllDrives ? de.uiAlleLaufwerkeFreigeben : de.uiFreigegebeneOrdner}{draft.readOnlyMode ? ' · ' + de.readOnly : ''}</li>
+          {draft.roots.map((root) => <li key={root.path}>{root.label || root.path}{root.readOnly ? ' · ' + de.readOnly : ''}</li>)}
+        </ul>}
+        {!loading && draft?.canEdit && <>
           <div className="settings-toggle-row"><span><strong>{de.uiAlleLaufwerkeFreigeben}</strong><small>{de.uiJedesBereiteLaufwerkIstSichtbar}</small></span><button role="switch" aria-label={de.uiAlleLaufwerkeFreigeben} aria-checked={draft.shareAllDrives} disabled={saving || (!draft.shareAllDrives && draft.roots.length === 0)} className={`switch${draft.shareAllDrives ? ' checked' : ''}`} onClick={() => setShareValue({ shareAllDrives: !draft.shareAllDrives })}><i /></button></div>
           <div className="settings-toggle-row"><span><strong>{de.uiAlleFreigabenNurLesen}</strong><small>{de.uiDateienAufFreigabenNichtAndern}</small></span><button role="switch" aria-label={de.uiAlleFreigabenNurLesen} aria-checked={draft.readOnlyMode} disabled={saving} className={`switch${draft.readOnlyMode ? ' checked' : ''}`} onClick={() => setShareValue({ readOnlyMode: !draft.readOnlyMode })}><i /></button></div>
           <div className="settings-toggle-row"><span><strong>{de.uiSystemordnerSchreibgeschuetztHalten}</strong><small>{de.uiWindowsUndProgramFilesSindStandardmaessigGesperrt}</small></span><button role="switch" aria-label={de.uiSystemordnerSchreibgeschuetztHalten} aria-checked={draft.protectSystemFolders} disabled={saving} className={`switch${draft.protectSystemFolders ? ' checked' : ''}`} onClick={() => setShareValue({ protectSystemFolders: !draft.protectSystemFolders })}><i /></button></div>

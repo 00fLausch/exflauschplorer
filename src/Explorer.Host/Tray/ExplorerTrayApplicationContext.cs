@@ -110,12 +110,11 @@ public sealed class ExplorerTrayApplicationContext : ApplicationContext
 
     private static void OpenPath(string path)
     {
-        if (path.EndsWith(".json", StringComparison.OrdinalIgnoreCase) && !File.Exists(path))
+        if (path.EndsWith(".json", StringComparison.OrdinalIgnoreCase))
         {
-            Directory.CreateDirectory(Path.GetDirectoryName(path)!);
-            File.WriteAllText(path, "{}" + Environment.NewLine);
+            if (!File.Exists(path)) _ = SettingsStore.Load();
         }
-        else if (!Directory.Exists(path)) Directory.CreateDirectory(path);
+        else Directory.CreateDirectory(path);
         Process.Start(new ProcessStartInfo(path) { UseShellExecute = true });
     }
 

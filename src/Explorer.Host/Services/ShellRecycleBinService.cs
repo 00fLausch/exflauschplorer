@@ -91,8 +91,8 @@ public sealed class ShellRecycleBinService : IRecycleBinService
                     var size = TryLong(() => item.Size);
                     var deleted = TryDate(() => item.ExtendedProperty("System.Recycle.DateDeleted"));
                     var isDirectory = TryBool(() => item.IsFolder);
-                    var key = MakeRecycleId(original, name, size, deleted, isDirectory);
-                    result.Add(new RecycleBinEntryDto(key, name, original, size, deleted, isDirectory));
+                    var key = MakeRecycleId(item);
+                    result.Add(new RecycleBinEntryDto(key, name, Path.Combine(original, name), size, deleted, isDirectory));
                 }
                 catch (COMException) { }
             }
@@ -189,7 +189,10 @@ public sealed class ShellRecycleBinService : IRecycleBinService
                 try
                 {
                     if (MakeRecycleId(item) != id) continue;
-                    item.InvokeVerb("delete");
+                    var itemPath = Convert.ToString(item.Path);
+                    if (string.IsNullOrWhiteSpace(itemPath))
+                        throw new IOException("Windows hat den Papierkorbeintrag nicht eindeutig identifiziert.");
+                    Delete(itemPath, recycle: false);
                     return true;
                 }
                 catch (COMException) { }
@@ -203,12 +206,13 @@ public sealed class ShellRecycleBinService : IRecycleBinService
     {
         var original = Convert.ToString(item.ExtendedProperty("System.Recycle.DeletedFrom")) ?? "";
         var name = Convert.ToString(item.Name) ?? "";
-        return MakeRecycleId(original, name, TryLong(() => item.Size), TryDate(() => item.ExtendedProperty("System.Recycle.DateDeleted")), TryBool(() => item.IsFolder));
+        var shellPath = Convert.ToString(item.Path) ?? "";
+        return MakeRecycleId(original, name, shellPath, TryLong(() => item.Size), TryDate(() => item.ExtendedProperty("System.Recycle.DateDeleted")), TryBool(() => item.IsFolder));
     }
 
-    private static string MakeRecycleId(string original, string name, long? size, DateTimeOffset? deleted, bool isDirectory)
+    private static string MakeRecycleId(string original, string name, string shellPath, long? size, DateTimeOffset? deleted, bool isDirectory)
     {
-        var bytes = SHA256.HashData(Encoding.UTF8.GetBytes($"{original}\0{name}\0{size}\0{deleted:O}\0{isDirectory}"));
+        var bytes = SHA256.HashData(Encoding.UTF8.GetBytes($"{original}\0{name}\0{shellPath}\0{size}\0{deleted:O}\0{isDirectory}"));
         return Convert.ToHexString(bytes);
     }
 
@@ -227,7 +231,7 @@ public sealed class ShellRecycleBinService : IRecycleBinService
     private static bool TryBool(Func<dynamic> value) { try { return Convert.ToBoolean(value()); } catch { return false; } }
     private static void Release(object? value) { if (value is not null && Marshal.IsComObject(value)) Marshal.FinalReleaseComObject(value); }
 
-    private static bool Delete(string path)
+    private static bool Delete(string path, bool recycle = true)
     {
         IFileOperation? operation = null;
         IShellItem? item = null;
@@ -235,8 +239,9 @@ public sealed class ShellRecycleBinService : IRecycleBinService
         {
             var type = Type.GetTypeFromCLSID(FileOperationClassId, throwOnError: true)!;
             operation = (IFileOperation)Activator.CreateInstance(type)!;
-            Marshal.ThrowExceptionForHR(operation.SetOperationFlags(
-                FofSilent | FofNoConfirmation | FofAllowUndo | FofNoErrorUi | FofxRecycleOnDelete));
+            var flags = FofSilent | FofNoConfirmation | FofNoErrorUi;
+            if (recycle) flags |= FofAllowUndo | FofxRecycleOnDelete;
+            Marshal.ThrowExceptionForHR(operation.SetOperationFlags(flags));
             var iid = ShellItemInterfaceId;
             Marshal.ThrowExceptionForHR(SHCreateItemFromParsingName(path, IntPtr.Zero, ref iid, out item));
             Marshal.ThrowExceptionForHR(operation.DeleteItem(item, IntPtr.Zero));

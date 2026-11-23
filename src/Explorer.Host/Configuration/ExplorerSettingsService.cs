@@ -8,7 +8,8 @@ public sealed record ExplorerShareSettings(
     bool ShareAllDrives,
     bool ReadOnlyMode,
     bool ProtectSystemFolders,
-    IReadOnlyList<ShareRootSetting> Roots);
+    IReadOnlyList<ShareRootSetting> Roots,
+    bool CanEdit = false);
 
 public sealed record UpdateExplorerShareSettings(
     bool ShareAllDrives,
@@ -55,6 +56,8 @@ public sealed class ExplorerSettingsService
             {
                 Port = _settings.Port,
                 TailscaleHttpsPort = _settings.TailscaleHttpsPort,
+                TailscaleHostName = _settings.TailscaleHostName,
+                LocalSetupToken = _settings.LocalSetupToken,
                 AllowedLogins = [.. _settings.AllowedLogins],
                 ShareAllDrives = request.ShareAllDrives,
                 Roots = roots,

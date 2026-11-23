@@ -20,13 +20,14 @@ public sealed class ExplorerJobService : BackgroundService
     private readonly ILogger<ExplorerJobService> _logger;
     private readonly Func<string, string, bool> _sameVolume;
     private readonly ConcurrentDictionary<string, JobState> _jobs = new(StringComparer.OrdinalIgnoreCase);
-    private readonly ConcurrentDictionary<Guid, Channel<JobSnapshot>> _subscribers = new();
+    private readonly ConcurrentDictionary<Guid, JobSubscriber> _subscribers = new();
     private readonly Channel<string> _queue = Channel.CreateUnbounded<string>(new UnboundedChannelOptions { SingleReader = false, SingleWriter = false });
     private readonly SemaphoreSlim _storeLock = new(1, 1);
     private readonly SemaphoreSlim _undoScheduleGate = new(1, 1);
     private readonly object _undoLock = new();
     private readonly List<UndoRecord> _undo = [];
     private readonly string _storePath;
+    private int _checkpointNeeded;
 
     public ExplorerJobService(PathAccessPolicy policy, IRecycleBinService recycleBin, ILogger<ExplorerJobService> logger,
         string? storePath = null, Func<string, string, bool>? sameVolumeResolver = null)
@@ -39,37 +40,50 @@ public sealed class ExplorerJobService : BackgroundService
         LoadStore();
     }
 
-    public IReadOnlyList<JobSnapshot> GetJobs() => _jobs.Values
+    public IReadOnlyList<JobSnapshot> GetJobs(string? owner = null) => _jobs.Values
+        .Where(job => SameOwner(job.Owner, owner))
         .Select(job => job.Snapshot())
         .OrderByDescending(job => job.CreatedAt)
         .ToArray();
 
-    public JobSnapshot? GetJob(string id) => _jobs.TryGetValue(id, out var job) ? job.Snapshot() : null;
+    public int CountActiveJobs() => _jobs.Values.Count(job => !job.IsIdle);
 
-    public Task<JobSnapshot> EnqueueAsync(OperationRequest request, CancellationToken cancellationToken) =>
-        EnqueueInternalAsync(request, null, cancellationToken);
+    public JobSnapshot? GetJob(string id, string? owner = null) => FindOwnedJob(id, owner)?.Snapshot();
+
+    public Task<JobSnapshot> EnqueueAsync(OperationRequest request, CancellationToken cancellationToken, string? owner = null)
+    {
+        if (request.UndoActions is not null || string.Equals(request.Kind?.Trim(), "undo-batch", StringComparison.OrdinalIgnoreCase))
+            throw new ArgumentException("Rückgängig-Aufträge können nur über den Rückgängig-Befehl erstellt werden.");
+        return EnqueueInternalAsync(request, null, cancellationToken, owner);
+    }
 
     private async Task<JobSnapshot> EnqueueInternalAsync(OperationRequest request, string? undoSourceJobId,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken, string? owner)
     {
         if (request.Sources is null || request.Sources.Count > 10000)
             throw new ArgumentException("Die Auswahl ist ungültig oder enthält zu viele Einträge.");
         var kind = request.Kind?.Trim().ToLowerInvariant();
         if (string.IsNullOrWhiteSpace(kind)) throw new ArgumentException("Wähle zuerst einen Dateivorgang aus.");
         var id = Guid.NewGuid().ToString("N");
-        var state = new JobState(id, kind, request with { Kind = kind }) { UndoSourceJobId = undoSourceJobId };
+        var state = new JobState(id, kind, request with { Kind = kind }, owner) { UndoSourceJobId = undoSourceJobId };
         if (!_jobs.TryAdd(id, state)) throw new InvalidOperationException("Der Auftrag konnte nicht angelegt werden.");
-        _logger.LogInformation("Dateioperation {JobId} ({Kind}) von {SourceCount} Quelle(n) zu {Destination} angelegt: {Sources}",
-            id, kind, request.Sources.Count, request.Destination, string.Join(" | ", request.Sources));
-        await PersistAsync(cancellationToken);
+        try { await PersistAsync(cancellationToken); }
+        catch
+        {
+            _jobs.TryRemove(id, out _);
+            RequestCheckpoint();
+            throw;
+        }
+        _logger.LogInformation("Dateioperation {JobId} ({Kind}) mit {SourceCount} Quellen angelegt", id, kind, request.Sources.Count);
         _queue.Writer.TryWrite(id);
         Publish(state);
         return state.Snapshot();
     }
 
-    public bool Pause(string id)
+    public bool Pause(string id, string? owner = null)
     {
-        if (!_jobs.TryGetValue(id, out var job)) return false;
+        var job = FindOwnedJob(id, owner);
+        if (job is null) return false;
         lock (job.Sync)
         {
             if (job.Status != "running") return false;
@@ -78,13 +92,14 @@ public sealed class ExplorerJobService : BackgroundService
             job.Message = "Pausiert";
         }
         Publish(job);
-        _ = PersistAsync(CancellationToken.None);
+        RequestCheckpoint();
         return true;
     }
 
-    public bool Resume(string id)
+    public bool Resume(string id, string? owner = null)
     {
-        if (!_jobs.TryGetValue(id, out var job)) return false;
+        var job = FindOwnedJob(id, owner);
+        if (job is null) return false;
         lock (job.Sync)
         {
             if (job.Status != "paused") return false;
@@ -94,13 +109,14 @@ public sealed class ExplorerJobService : BackgroundService
             job.PauseCompletion = null;
         }
         Publish(job);
-        _ = PersistAsync(CancellationToken.None);
+        RequestCheckpoint();
         return true;
     }
 
-    public bool Cancel(string id)
+    public bool Cancel(string id, string? owner = null)
     {
-        if (!_jobs.TryGetValue(id, out var job)) return false;
+        var job = FindOwnedJob(id, owner);
+        if (job is null) return false;
         var cancelledBeforeStart = false;
         lock (job.Sync)
         {
@@ -120,14 +136,15 @@ public sealed class ExplorerJobService : BackgroundService
             job.PauseCompletion?.TrySetResult();
         }
         Publish(job);
-        if (cancelledBeforeStart) _ = PersistAsync(CancellationToken.None);
+        if (cancelledBeforeStart) RequestCheckpoint();
         return true;
     }
 
-    public bool ResolveConflict(string id, ConflictResolution resolution)
+    public bool ResolveConflict(string id, ConflictResolution resolution, string? owner = null)
     {
-        if (!_jobs.TryGetValue(id, out var job)) return false;
-        var choice = resolution.Choice.Trim().ToLowerInvariant();
+        var job = FindOwnedJob(id, owner);
+        if (job is null) return false;
+        var choice = resolution.Choice?.Trim().ToLowerInvariant();
         if (choice is not ("replace" or "skip" or "keep-both")) return false;
         lock (job.Sync)
         {
@@ -139,7 +156,8 @@ public sealed class ExplorerJobService : BackgroundService
         return true;
     }
 
-    public async IAsyncEnumerable<JobSnapshot> Watch([System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancellationToken)
+    public async IAsyncEnumerable<JobSnapshot> Watch(
+        [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancellationToken, string? owner = null)
     {
         var channel = Channel.CreateBounded<JobSnapshot>(new BoundedChannelOptions(64)
         {
@@ -148,68 +166,60 @@ public sealed class ExplorerJobService : BackgroundService
             SingleWriter = false
         });
         var id = Guid.NewGuid();
-        _subscribers[id] = channel;
+        _subscribers[id] = new JobSubscriber(owner, channel);
         try
         {
-            foreach (var job in GetJobs()) yield return job;
+            foreach (var job in GetJobs(owner)) yield return job;
             await foreach (var update in channel.Reader.ReadAllAsync(cancellationToken)) yield return update;
         }
         finally { _subscribers.TryRemove(id, out _); }
     }
 
-    public async Task<JobSnapshot?> UndoLastAsync(CancellationToken cancellationToken)
+    public async Task<JobSnapshot?> UndoLastAsync(CancellationToken cancellationToken, string? owner = null)
     {
         await _undoScheduleGate.WaitAsync(cancellationToken);
         try
         {
+            var pending = _jobs.Values.Where(job => job.UndoSourceJobId is not null && SameOwner(job.Owner, owner))
+                .Select(job => job.Snapshot()).FirstOrDefault(job => !IsTerminal(job.Status));
+            if (pending is not null) return pending;
+
             UndoRecord[] records;
             lock (_undoLock)
             {
-                var last = _undo.LastOrDefault();
+                var last = _undo.LastOrDefault(record => SameOwner(record.Owner, owner));
                 if (last is null) return null;
-                var pending = _jobs.Values
-                    .Select(job => job.Snapshot())
-                    .FirstOrDefault(job => job.Status is not ("failed" or "cancelled") &&
-                        _jobs[job.Id].UndoSourceJobId == last.JobId);
-                if (pending is not null) return pending;
-                records = _undo.Where(record => record.JobId == last.JobId).ToArray();
+                records = _undo.Where(record => record.JobId == last.JobId && SameOwner(record.Owner, owner)).ToArray();
             }
-            var actions = records.Reverse().Select(record => record.Kind switch
-            {
-                "delete" => new OperationUndoAction("restore", record.OriginalPath, ""),
-                "move" or "rename" => new OperationUndoAction("move", record.ResultPath, record.OriginalPath),
-                "restore-folder" => new OperationUndoAction("create-folder", record.OriginalPath, ""),
-                "copy" or "create-folder" or "create-file" or "zip" or "unzip" => new OperationUndoAction("delete", record.ResultPath, ""),
-                _ => null
-            }).Where(action => action is not null).Cast<OperationUndoAction>().ToArray();
+            var actions = records.Reverse().Select(ToUndoAction).OfType<OperationUndoAction>().ToArray();
             if (actions.Length == 0) return null;
 
             return await EnqueueInternalAsync(
-                new OperationRequest("undo-batch", [], UndoActions: actions), records[0].JobId, cancellationToken);
+                new OperationRequest("undo-batch", [], UndoActions: actions), records[0].JobId, cancellationToken, owner);
         }
         finally { _undoScheduleGate.Release(); }
     }
 
+    private static OperationUndoAction? ToUndoAction(UndoRecord record) => record.Kind switch
+    {
+        "delete" => new OperationUndoAction("restore", record.OriginalPath, ""),
+        "move" or "rename" => new OperationUndoAction("move", record.ResultPath, record.OriginalPath),
+        "restore-folder" => new OperationUndoAction("create-folder", record.OriginalPath, ""),
+        "create-folder" => new OperationUndoAction("delete-empty-folder", record.ResultPath, ""),
+        "copy" or "create-file" or "zip" or "unzip" => new OperationUndoAction("delete", record.ResultPath, ""),
+        _ => null
+    };
+
+    private JobState? FindOwnedJob(string id, string? owner) =>
+        _jobs.TryGetValue(id, out var job) && SameOwner(job.Owner, owner) ? job : null;
+
+    private static bool SameOwner(string? storedOwner, string? owner) =>
+        string.Equals(storedOwner, owner, StringComparison.OrdinalIgnoreCase);
+
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
-        var workers = Enumerable.Range(0, 2).Select(_ => WorkerAsync(stoppingToken)).ToArray();
-        foreach (var job in _jobs.Values.Where(job => !IsTerminal(job.Status)))
-        {
-            lock (job.Sync)
-            {
-                job.Status = "queued";
-                job.Conflict = null;
-                job.ConflictCompletion = null;
-                job.PauseCompletion = null;
-                job.Message = "Wartet auf Verarbeitung";
-                job.CompletedBytes = 0;
-                job.CompletedItems = 0;
-                job.SkippedItems = 0;
-            }
-            _queue.Writer.TryWrite(job.Id);
-        }
-        await PersistAsync(stoppingToken);
-        await Task.WhenAll(workers);
+        await PersistCheckpointAsync();
+        await Task.WhenAll(WorkerAsync(stoppingToken), WorkerAsync(stoppingToken), CheckpointLoopAsync(stoppingToken));
     }
 
     private async Task WorkerAsync(CancellationToken stoppingToken)
@@ -230,57 +240,50 @@ public sealed class ExplorerJobService : BackgroundService
                     job.StartedAt = DateTimeOffset.UtcNow;
                 }
                 Publish(job);
-                await PersistAsync(stoppingToken);
+                string status;
+                string message;
+                string? error = null;
                 try
                 {
+                    // Save the transition before making any filesystem changes.
+                    await PersistAsync(cancellation.Token);
                     await ExecuteOperationAsync(job, cancellation.Token);
-                    lock (job.Sync)
-                    {
-                        job.Status = job.SkippedItems > 0 ? "completed-with-skips" : "completed";
-                        job.Message = job.SkippedItems > 0
-                            ? $"Abgeschlossen · {job.SkippedItems} Elemente übersprungen"
-                            : "Abgeschlossen";
-                        job.Conflict = null;
-                    }
-                    if (job.Kind == "undo-batch") ConsumeUndoFor(job);
-                    else AddUndoFor(job);
+                    status = job.SkippedItems > 0 ? "completed-with-skips" : "completed";
+                    message = job.SkippedItems > 0
+                        ? $"Abgeschlossen · {job.SkippedItems} Elemente übersprungen"
+                        : "Abgeschlossen";
                 }
                 catch (OperationCanceledException) when (cancellation.IsCancellationRequested)
                 {
-                    lock (job.Sync)
-                    {
-                        job.Status = stoppingToken.IsCancellationRequested ? "queued" : "cancelled";
-                        job.Message = stoppingToken.IsCancellationRequested
-                            ? "Wird beim nächsten Start fortgesetzt"
-                            : $"Abgebrochen · {job.CompletedItems} abgeschlossene Elemente bleiben erhalten";
-                        job.Conflict = null;
-                    }
+                    status = "cancelled";
+                    message = stoppingToken.IsCancellationRequested
+                        ? "Beim Beenden unterbrochen. Bereits abgeschlossene Änderungen bleiben erhalten."
+                        : $"Abgebrochen · {job.CompletedItems} abgeschlossene Elemente bleiben erhalten";
                 }
                 catch (Exception exception)
                 {
                     _logger.LogWarning(exception, "Dateioperation {JobId} ist fehlgeschlagen", job.Id);
-                    lock (job.Sync)
-                    {
-                        job.Status = "failed";
-                        job.Error = GermanErrors.For(exception);
-                        job.Message = job.Error;
-                        job.Conflict = null;
-                    }
+                    status = "failed";
+                    error = GermanErrors.For(exception);
+                    message = error;
                 }
-                finally
+
+                if (job.Kind != "undo-batch") AddUndoFor(job);
+                lock (job.Sync)
                 {
-                    lock (job.Sync)
-                    {
-                        job.Cancellation = null;
-                        job.ConflictCompletion = null;
-                        job.PauseCompletion?.TrySetResult();
-                        job.PauseCompletion = null;
-                    }
-                    Publish(job);
-                    await PersistAsync(CancellationToken.None);
-                    _logger.LogInformation("Dateioperation {JobId} ({Kind}) beendet: {Status}. Quellen: {Sources}; Ziel: {Destination}",
-                        job.Id, job.Kind, job.Status, string.Join(" | ", job.Request.Sources), job.Request.Destination);
+                    job.Status = status;
+                    job.Message = message;
+                    job.Error = error;
+                    job.Conflict = null;
+                    job.ConflictCompletion = null;
+                    job.PauseCompletion?.TrySetResult();
+                    job.PauseCompletion = null;
                 }
+                await PersistCheckpointAsync();
+                lock (job.Sync) job.Cancellation = null;
+                Publish(job);
+                _logger.LogInformation("Dateioperation {JobId} ({Kind}) mit Status {Status} beendet. Bearbeitete Einträge: {CompletedItems}",
+                    job.Id, job.Kind, job.Status, job.CompletedItems);
             }
         }
         catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested) { }
@@ -328,16 +331,25 @@ public sealed class ExplorerJobService : BackgroundService
         var destination = _policy.Authorize(job.Request.Destination, write: true);
         if (!Directory.Exists(destination)) throw new DirectoryNotFoundException();
         var move = job.Kind == "move";
-        var sources = job.Request.Sources.Select(path => _policy.Authorize(path, write: move)).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
+        var sources = job.Request.Sources.Select(path => move ? _policy.AuthorizeEntryMutation(path) : _policy.Authorize(path)).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
+        var linkMoves = new Dictionary<string, FileAttributes>(StringComparer.OrdinalIgnoreCase);
         var plan = new List<TransferItem>();
         var folderMoveCopies = new List<PendingFolderMoveCopy>();
         foreach (var source in sources)
         {
-            if (!File.Exists(source) && !Directory.Exists(source)) throw new FileNotFoundException();
+            var attributes = File.GetAttributes(source);
             var rootName = sources.Length == 1 && !string.IsNullOrWhiteSpace(job.Request.NewName)
-                ? job.Request.NewName
+                ? PathAccessPolicy.ValidateEntryName(job.Request.NewName)
                 : Path.GetFileName(Path.TrimEndingDirectorySeparator(source));
             var targetRoot = Path.Combine(destination, rootName);
+            if (move && IsRedirectingLink(source, attributes))
+            {
+                if (!_sameVolume(source, destination))
+                    throw new IOException("Verknüpfungen können nur innerhalb desselben Laufwerks verschoben werden.");
+                linkMoves.Add(source, attributes);
+                plan.Add(new TransferItem(source, targetRoot, false, 0, source, File.GetLastWriteTimeUtc(source)));
+                continue;
+            }
             if (Directory.Exists(source)) EnumerateTree(source, targetRoot, plan, cancellationToken);
             else
             {
@@ -347,7 +359,7 @@ public sealed class ExplorerJobService : BackgroundService
         }
         SetTotals(job, plan.Count, plan.Sum(item => item.Size));
 
-        if (move && sources.Length == 1 && Directory.Exists(sources[0]) && _sameVolume(sources[0], destination))
+        if (move && sources.Length == 1 && !linkMoves.ContainsKey(sources[0]) && Directory.Exists(sources[0]) && _sameVolume(sources[0], destination))
         {
             var target = plan.First(item => item.SourcePath == sources[0]).TargetPath;
             if (PathEquals(target, sources[0]))
@@ -362,11 +374,10 @@ public sealed class ExplorerJobService : BackgroundService
                 if (choice == "keep-both") target = GetAvailablePath(target);
                 else
                 {
-                    await _recycleBin.DeleteAsync(target, cancellationToken);
-                    AddUndo(job, "delete", target, "");
+                    throw new IOException("Vorhandene Ordner werden beim Verschieben nicht ersetzt. Wähle „Beide behalten“ oder „Überspringen“.");
                 }
             }
-            _policy.Authorize(target, write: true);
+            target = _policy.AuthorizeEntryMutation(target);
             Directory.Move(sources[0], target);
             AddUndo(job, "move", sources[0], target);
             SetProgress(job, job.TotalBytes ?? 0, job.TotalItems ?? 0, "Ordner verschoben");
@@ -377,6 +388,25 @@ public sealed class ExplorerJobService : BackgroundService
         {
             cancellationToken.ThrowIfCancellationRequested();
             await WaitIfPausedAsync(job, cancellationToken);
+            if (linkMoves.TryGetValue(item.SourcePath, out var linkAttributes))
+            {
+                var targetLink = _policy.AuthorizeEntryMutation(item.TargetPath);
+                if (!PathEquals(item.SourcePath, targetLink))
+                {
+                    if (EntryExists(targetLink))
+                    {
+                        var choice = await ResolveConflictAsync(job, item.SourcePath, targetLink, cancellationToken);
+                        if (choice == "skip") { job.SkippedItems++; job.CompletedItems++; continue; }
+                        if (choice != "keep-both") throw new IOException("Beim Verschieben von Verknüpfungen wird kein vorhandener Eintrag ersetzt.");
+                        targetLink = _policy.AuthorizeEntryMutation(GetAvailablePath(targetLink));
+                    }
+                    MoveEntry(item.SourcePath, targetLink, linkAttributes);
+                    AddUndo(job, "move", item.SourcePath, targetLink);
+                }
+                job.CompletedItems++;
+                PublishIfDue(job);
+                continue;
+            }
             if (item.IsDirectory)
             {
                 var targetDirectory = _policy.Authorize(item.TargetPath, write: true);
@@ -390,8 +420,8 @@ public sealed class ExplorerJobService : BackgroundService
                 continue;
             }
 
-            var targetFile = _policy.Authorize(item.TargetPath, write: true);
-            var sourceFile = _policy.Authorize(item.SourcePath);
+            var targetFile = _policy.AuthorizeEntryMutation(item.TargetPath);
+            var sourceFile = move ? _policy.AuthorizeEntryMutation(item.SourcePath) : _policy.Authorize(item.SourcePath);
             if (PathEquals(sourceFile, targetFile))
             {
                 job.CompletedBytes += item.Size;
@@ -409,8 +439,7 @@ public sealed class ExplorerJobService : BackgroundService
                     if (choice == "keep-both") targetFile = GetAvailablePath(targetFile);
                     else
                     {
-                        await _recycleBin.DeleteAsync(targetFile, cancellationToken);
-                        AddUndo(job, "delete", targetFile, "");
+                        await RecycleReplaceableFileAsync(job, targetFile, cancellationToken);
                     }
                 }
                 Directory.CreateDirectory(Path.GetDirectoryName(targetFile)!);
@@ -451,7 +480,7 @@ public sealed class ExplorerJobService : BackgroundService
 
         if (move && job.SkippedItems == 0)
         {
-            foreach (var source in sources.Where(Directory.Exists))
+            foreach (var source in sources.Where(source => !linkMoves.ContainsKey(source) && Directory.Exists(source)))
             {
                 cancellationToken.ThrowIfCancellationRequested();
                 foreach (var pending in folderMoveCopies.Where(item => PathEquals(item.SourceRoot, source)))
@@ -495,6 +524,7 @@ public sealed class ExplorerJobService : BackgroundService
             foreach (var child in Directory.EnumerateFileSystemEntries(directory.Source))
             {
                 cancellationToken.ThrowIfCancellationRequested();
+                if (!_policy.IsAllowed(child)) continue;
                 var attributes = File.GetAttributes(child);
                 if ((attributes & FileAttributes.ReparsePoint) != 0) continue;
                 var childTarget = Path.Combine(directory.Target, Path.GetFileName(child));
@@ -520,7 +550,7 @@ public sealed class ExplorerJobService : BackgroundService
             if (choice == "keep-both") target = GetAvailablePath(target);
         }
 
-        target = _policy.Authorize(target, write: true);
+        target = _policy.AuthorizeEntryMutation(target);
         var parent = Path.GetDirectoryName(target) ?? throw new ArgumentException("Der Zielordner ist ungültig.");
         Directory.CreateDirectory(parent);
         var staging = Path.Combine(parent, $".wme-{job.Id}-{Guid.NewGuid():N}.partial");
@@ -555,9 +585,7 @@ public sealed class ExplorerJobService : BackgroundService
 
             if (File.Exists(target) || Directory.Exists(target))
             {
-                if (Directory.Exists(target)) throw new IOException($"Am Ziel liegt ein Ordner mit dem Namen „{Path.GetFileName(target)}“.");
-                await _recycleBin.DeleteAsync(target, cancellationToken);
-                AddUndo(job, "delete", target, "");
+                await RecycleReplaceableFileAsync(job, target, cancellationToken);
             }
             File.Move(staging, target);
             try
@@ -599,8 +627,8 @@ public sealed class ExplorerJobService : BackgroundService
         {
             cancellationToken.ThrowIfCancellationRequested();
             await WaitIfPausedAsync(job, cancellationToken);
-            var source = _policy.Authorize(job.Request.Sources[index], write: true);
-            if (!File.Exists(source) && !Directory.Exists(source)) throw new FileNotFoundException();
+            var source = _policy.AuthorizeEntryMutation(job.Request.Sources[index]);
+            var sourceAttributes = File.GetAttributes(source);
             var originalName = Path.GetFileName(source);
             var extension = Path.GetExtension(originalName);
             var stem = Path.GetFileNameWithoutExtension(originalName);
@@ -610,23 +638,21 @@ public sealed class ExplorerJobService : BackgroundService
                 .Replace("{n}", (index + 1).ToString("D2"), StringComparison.OrdinalIgnoreCase);
             if (job.Request.Sources.Count > 1 && !pattern.Contains("{n}", StringComparison.OrdinalIgnoreCase) && index > 0)
                 name = $"{Path.GetFileNameWithoutExtension(name)} ({index + 1}){Path.GetExtension(name)}";
-            if (name.IndexOfAny([Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar]) >= 0 || name is "." or "..")
-                throw new ArgumentException("Der Name darf keinen Pfad enthalten.");
-            var target = _policy.Authorize(Path.Combine(Path.GetDirectoryName(source)!, name), write: true);
+            var target = _policy.AuthorizeEntryMutation(Path.Combine(Path.GetDirectoryName(source)!, PathAccessPolicy.ValidateEntryName(name)));
             if (PathEquals(source, target)) { job.CompletedItems++; continue; }
-            if (File.Exists(target) || Directory.Exists(target))
+            if (EntryExists(target))
             {
                 var choice = await ResolveConflictAsync(job, source, target, cancellationToken);
                 if (choice == "skip") { job.SkippedItems++; job.CompletedItems++; continue; }
                 if (choice == "keep-both") target = GetAvailablePath(target);
                 else
                 {
-                    await _recycleBin.DeleteAsync(target, cancellationToken);
-                    AddUndo(job, "delete", target, "");
+                    if ((sourceAttributes & FileAttributes.Directory) != 0 || IsRedirectingLink(source, sourceAttributes))
+                        throw new IOException("Beim Umbenennen eines Ordners oder einer Verknüpfung wird kein vorhandener Eintrag ersetzt.");
+                    await RecycleReplaceableFileAsync(job, target, cancellationToken);
                 }
             }
-            if (Directory.Exists(source)) Directory.Move(source, target);
-            else File.Move(source, target);
+            MoveEntry(source, target, sourceAttributes);
             AddUndo(job, "rename", source, target);
             job.CompletedItems++;
             PublishIfDue(job);
@@ -641,11 +667,13 @@ public sealed class ExplorerJobService : BackgroundService
         {
             cancellationToken.ThrowIfCancellationRequested();
             await WaitIfPausedAsync(job, cancellationToken);
-            var path = _policy.Authorize(rawPath, write: true);
-            if (!File.Exists(path) && !Directory.Exists(path)) { job.CompletedItems++; continue; }
+            var path = _policy.AuthorizeEntryMutation(rawPath);
+            if (!EntryExists(path)) { job.CompletedItems++; continue; }
+            var attributes = File.GetAttributes(path);
             if (job.Request.Permanent)
             {
-                if (Directory.Exists(path)) Directory.Delete(path, recursive: true);
+                if ((attributes & FileAttributes.Directory) != 0)
+                    Directory.Delete(path, recursive: !IsRedirectingLink(path, attributes));
                 else File.Delete(path);
             }
             else await _recycleBin.DeleteAsync(path, cancellationToken);
@@ -653,6 +681,35 @@ public sealed class ExplorerJobService : BackgroundService
             job.CompletedItems++;
             PublishIfDue(job);
         }
+    }
+
+    private static bool EntryExists(string path)
+    {
+        try { _ = File.GetAttributes(path); return true; }
+        catch (FileNotFoundException) { return false; }
+        catch (DirectoryNotFoundException) { return false; }
+    }
+
+    private static bool IsRedirectingLink(string path, FileAttributes attributes)
+    {
+        if ((attributes & FileAttributes.ReparsePoint) == 0) return false;
+        FileSystemInfo entry = (attributes & FileAttributes.Directory) != 0 ? new DirectoryInfo(path) : new FileInfo(path);
+        return entry.LinkTarget is not null;
+    }
+
+    private static void MoveEntry(string source, string target, FileAttributes attributes)
+    {
+        if ((attributes & FileAttributes.Directory) != 0) Directory.Move(source, target);
+        else File.Move(source, target);
+    }
+
+    private async Task RecycleReplaceableFileAsync(JobState job, string path, CancellationToken cancellationToken)
+    {
+        path = _policy.AuthorizeEntryMutation(path);
+        if ((File.GetAttributes(path) & (FileAttributes.Directory | FileAttributes.ReparsePoint)) != 0)
+            throw new IOException("Ein vorhandener Ordner oder eine Verknüpfung kann nicht durch eine Datei ersetzt werden.");
+        await _recycleBin.DeleteAsync(path, cancellationToken);
+        AddUndo(job, "delete", path, "");
     }
 
     private async Task UndoBatchAsync(JobState job, CancellationToken cancellationToken)
@@ -665,19 +722,18 @@ public sealed class ExplorerJobService : BackgroundService
             await WaitIfPausedAsync(job, cancellationToken);
             if (action.Kind == "restore")
             {
-                await _recycleBin.RestoreOriginalPathAsync(action.SourcePath, cancellationToken);
+                await _recycleBin.RestoreOriginalPathAsync(_policy.AuthorizeEntryMutation(action.SourcePath), cancellationToken);
             }
             else if (action.Kind == "move")
             {
-                var source = _policy.Authorize(action.SourcePath, write: true);
-                var target = _policy.Authorize(action.TargetPath, write: true);
-                if (!File.Exists(source) && !Directory.Exists(source)) throw new FileNotFoundException();
-                if (File.Exists(target) || Directory.Exists(target)) throw new IOException($"„{Path.GetFileName(target)}“ ist am ursprünglichen Ort bereits vorhanden.");
+                var source = _policy.AuthorizeEntryMutation(action.SourcePath);
+                var target = _policy.AuthorizeEntryMutation(action.TargetPath);
+                var attributes = File.GetAttributes(source);
+                if (EntryExists(target)) throw new IOException($"„{Path.GetFileName(target)}“ ist am ursprünglichen Ort bereits vorhanden.");
                 var parent = Path.GetDirectoryName(target);
                 if (string.IsNullOrWhiteSpace(parent)) throw new IOException("Der ursprüngliche Ordner ist nicht mehr erreichbar.");
                 Directory.CreateDirectory(parent);
-                if (Directory.Exists(source)) Directory.Move(source, target);
-                else File.Move(source, target);
+                MoveEntry(source, target, attributes);
             }
             else if (action.Kind == "create-folder")
             {
@@ -686,11 +742,23 @@ public sealed class ExplorerJobService : BackgroundService
             }
             else if (action.Kind == "delete")
             {
-                var path = _policy.Authorize(action.SourcePath, write: true);
-                if (Directory.Exists(path) || File.Exists(path)) await _recycleBin.DeleteAsync(path, cancellationToken);
+                var path = _policy.AuthorizeEntryMutation(action.SourcePath);
+                if (EntryExists(path)) await _recycleBin.DeleteAsync(path, cancellationToken);
+            }
+            else if (action.Kind == "delete-empty-folder")
+            {
+                var path = _policy.AuthorizeEntryMutation(action.SourcePath);
+                if (EntryExists(path))
+                {
+                    var attributes = File.GetAttributes(path);
+                    if ((attributes & FileAttributes.Directory) == 0 || IsRedirectingLink(path, attributes))
+                        throw new IOException("Der beim Auftrag angelegte Ordner wurde zwischenzeitlich ersetzt.");
+                    Directory.Delete(path, recursive: false);
+                }
             }
             else throw new ArgumentException("Die Rückgängig-Aktion ist ungültig.");
 
+            ConsumeUndoStep(job, action);
             job.CompletedItems++;
             PublishIfDue(job);
         }
@@ -702,7 +770,7 @@ public sealed class ExplorerJobService : BackgroundService
             throw new ArgumentException("Wähle einen Ordner und gib einen Namen ein.");
         var parent = _policy.Authorize(job.Request.Destination, write: true);
         if (!Directory.Exists(parent)) throw new DirectoryNotFoundException();
-        var target = _policy.Authorize(Path.Combine(parent, job.Request.NewName), write: true);
+        var target = _policy.AuthorizeEntryMutation(Path.Combine(parent, PathAccessPolicy.ValidateEntryName(job.Request.NewName)));
         if (Directory.Exists(target) || File.Exists(target)) throw new IOException("Ein Element mit diesem Namen existiert bereits.");
         await WaitIfPausedAsync(job, cancellationToken);
         Directory.CreateDirectory(target);
@@ -717,7 +785,7 @@ public sealed class ExplorerJobService : BackgroundService
             throw new ArgumentException("Wähle einen Ordner und gib einen Dateinamen ein.");
         var parent = _policy.Authorize(job.Request.Destination, write: true);
         if (!Directory.Exists(parent)) throw new DirectoryNotFoundException();
-        var target = _policy.Authorize(Path.Combine(parent, job.Request.NewName), write: true);
+        var target = _policy.AuthorizeEntryMutation(Path.Combine(parent, PathAccessPolicy.ValidateEntryName(job.Request.NewName)));
         if (File.Exists(target) || Directory.Exists(target)) throw new IOException("Ein Element mit diesem Namen existiert bereits.");
         await WaitIfPausedAsync(job, cancellationToken);
         var contents = job.Request.Template?.Trim().ToLowerInvariant() switch
@@ -747,16 +815,16 @@ public sealed class ExplorerJobService : BackgroundService
             : Path.GetFileNameWithoutExtension(source);
         var requestedName = string.IsNullOrWhiteSpace(job.Request.NewName) ? baseName + ".zip" : job.Request.NewName;
         if (!requestedName.EndsWith(".zip", StringComparison.OrdinalIgnoreCase)) requestedName += ".zip";
-        var target = _policy.Authorize(Path.Combine(destination, requestedName), write: true);
+        var target = _policy.AuthorizeEntryMutation(Path.Combine(destination, PathAccessPolicy.ValidateEntryName(requestedName)));
         if (File.Exists(target) || Directory.Exists(target))
         {
             var choice = await ResolveConflictAsync(job, source, target, cancellationToken);
             if (choice == "skip") { job.SkippedItems = 1; return; }
             if (choice == "keep-both") target = GetAvailablePath(target);
         }
-        var files = EnumerateFiles(source, cancellationToken);
-        var totalBytes = files.Sum(file => new FileInfo(file).Length);
-        SetTotals(job, files.Count + 1, totalBytes);
+        var items = EnumerateArchiveItems(source, cancellationToken);
+        var totalBytes = items.Where(item => !item.Directory).Sum(item => new FileInfo(item.Path).Length);
+        SetTotals(job, items.Count + 1, totalBytes);
         var stage = Path.Combine(destination, $".wme-{job.Id}-{Guid.NewGuid():N}.partial");
         try
         {
@@ -765,18 +833,24 @@ public sealed class ExplorerJobService : BackgroundService
             {
                 File.SetAttributes(stage, FileAttributes.Hidden);
                 using var archive = new ZipArchive(output, ZipArchiveMode.Create, leaveOpen: true);
-                var root = Directory.Exists(source) ? source : Path.GetDirectoryName(source)!;
-                foreach (var file in files)
+                var root = Path.GetDirectoryName(source) ?? throw new ArgumentException("Ein ganzes Laufwerk kann nicht archiviert werden.");
+                var buffer = new byte[128 * 1024];
+                foreach (var item in items)
                 {
                     cancellationToken.ThrowIfCancellationRequested();
                     await WaitIfPausedAsync(job, cancellationToken);
-                    var relative = Path.GetRelativePath(root, file).Replace(Path.DirectorySeparatorChar, '/');
-                    if (Directory.Exists(source)) relative = Path.GetFileName(source.TrimEnd(Path.DirectorySeparatorChar)) + "/" + relative;
+                    var file = _policy.Authorize(item.Path);
+                    var relative = Path.GetRelativePath(root, item.Path).Replace(Path.DirectorySeparatorChar, '/');
+                    if (item.Directory)
+                    {
+                        archive.CreateEntry(relative + "/");
+                        job.CompletedItems++;
+                        continue;
+                    }
                     var entry = archive.CreateEntry(relative, CompressionLevel.Fastest);
                     await using var input = new FileStream(file, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete,
                         128 * 1024, FileOptions.Asynchronous | FileOptions.SequentialScan);
                     await using var entryStream = entry.Open();
-                    var buffer = new byte[128 * 1024];
                     int read;
                     while ((read = await input.ReadAsync(buffer, cancellationToken)) > 0)
                     {
@@ -787,11 +861,7 @@ public sealed class ExplorerJobService : BackgroundService
                     job.CompletedItems++;
                 }
             }
-            if (File.Exists(target))
-            {
-                await _recycleBin.DeleteAsync(target, cancellationToken);
-                AddUndo(job, "delete", target, "");
-            }
+            if (EntryExists(target)) await RecycleReplaceableFileAsync(job, target, cancellationToken);
             File.Move(stage, target);
             File.SetAttributes(target, File.GetAttributes(target) & ~FileAttributes.Hidden);
             AddUndo(job, "zip", source, target);
@@ -814,12 +884,13 @@ public sealed class ExplorerJobService : BackgroundService
         if (!Directory.Exists(destination)) throw new DirectoryNotFoundException();
         var defaultName = Path.GetFileNameWithoutExtension(source);
         var folderName = string.IsNullOrWhiteSpace(job.Request.NewName) ? defaultName : job.Request.NewName;
-        var target = _policy.Authorize(Path.Combine(destination, folderName), write: true);
-        if (Directory.Exists(target) || File.Exists(target))
+        var target = _policy.AuthorizeEntryMutation(Path.Combine(destination, PathAccessPolicy.ValidateEntryName(folderName)));
+        if (EntryExists(target))
         {
             var choice = await ResolveConflictAsync(job, source, target, cancellationToken);
             if (choice == "skip") { job.SkippedItems = 1; return; }
-            if (choice == "keep-both") target = GetAvailablePath(target);
+            if (choice == "keep-both") target = _policy.AuthorizeEntryMutation(GetAvailablePath(target));
+            else throw new IOException("Beim Entpacken wird kein vorhandener Eintrag ersetzt. Wähle „Beide behalten“ oder „Überspringen“.");
         }
         var staging = Path.Combine(destination, $".wme-{job.Id}-{Guid.NewGuid():N}.partial");
         Directory.CreateDirectory(staging);
@@ -833,21 +904,21 @@ public sealed class ExplorerJobService : BackgroundService
             else
             {
             using var archive = ZipFile.OpenRead(source);
+            var budget = ExtractionBudget(source, destination);
+            ValidateExtractionSize(archive.Entries.Count, archive.Entries.Select(entry => entry.Length), budget);
             SetTotals(job, archive.Entries.Count, archive.Entries.Sum(entry => entry.Length));
             var stageRoot = Path.TrimEndingDirectorySeparator(Path.GetFullPath(staging));
+            var buffer = new byte[128 * 1024];
             foreach (var entry in archive.Entries)
             {
                 cancellationToken.ThrowIfCancellationRequested();
                 await WaitIfPausedAsync(job, cancellationToken);
-                if (string.IsNullOrEmpty(entry.FullName)) continue;
-                var entryPath = entry.FullName.Replace('/', Path.DirectorySeparatorChar).Replace('\\', Path.DirectorySeparatorChar);
-                if (Path.IsPathRooted(entryPath)) throw new InvalidDataException("Das ZIP enthält einen ungültigen absoluten Pfad.");
-                var outputPath = Path.GetFullPath(Path.Combine(stageRoot, entryPath));
-                var relative = Path.GetRelativePath(stageRoot, outputPath);
-                if (relative == ".." || relative.StartsWith(".." + Path.DirectorySeparatorChar, StringComparison.Ordinal) || Path.IsPathRooted(relative))
-                    throw new InvalidDataException("Das ZIP versucht, Dateien außerhalb des Zielordners abzulegen.");
-                _ = PathAccessPolicy.NormalizeAbsolute(outputPath);
-                if (entry.FullName.EndsWith('/') || entry.FullName.EndsWith('\\'))
+                var directory = entry.FullName.EndsWith('/') || entry.FullName.EndsWith('\\');
+                if ((entry.ExternalAttributes >> 16 & 0xF000) == 0xA000 ||
+                    (entry.ExternalAttributes & (int)FileAttributes.ReparsePoint) != 0)
+                    throw new InvalidDataException("Verknüpfungen werden aus Archiven nicht entpackt.");
+                var outputPath = ResolveArchiveEntryPath(stageRoot, entry.FullName, directory);
+                if (directory)
                 {
                     Directory.CreateDirectory(outputPath);
                     job.CompletedItems++;
@@ -858,23 +929,23 @@ public sealed class ExplorerJobService : BackgroundService
                     await using var input = entry.Open();
                     await using var output = new FileStream(outputPath, FileMode.CreateNew, FileAccess.Write, FileShare.None,
                         128 * 1024, FileOptions.Asynchronous | FileOptions.SequentialScan);
-                    var buffer = new byte[128 * 1024];
+                    long fileBytes = 0;
                     int read;
                     while ((read = await input.ReadAsync(buffer, cancellationToken)) > 0)
                     {
+                        fileBytes += read;
+                        if (fileBytes > entry.Length || job.CompletedBytes + read > budget)
+                            throw new InvalidDataException("Die tatsächlich entpackte Datenmenge überschreitet das Archivlimit.");
                         await output.WriteAsync(buffer.AsMemory(0, read), cancellationToken);
                         job.CompletedBytes += read;
                         PublishIfDue(job);
                     }
+                    if (fileBytes != entry.Length) throw new InvalidDataException("Die Dateigröße im ZIP stimmt nicht mit dem gelesenen Inhalt überein.");
                     job.CompletedItems++;
                     }
                 }
             }
-            if (Directory.Exists(target) || File.Exists(target))
-            {
-                await _recycleBin.DeleteAsync(target, cancellationToken);
-                AddUndo(job, "delete", target, "");
-            }
+            target = _policy.AuthorizeEntryMutation(target);
             Directory.Move(staging, target);
             File.SetAttributes(target, File.GetAttributes(target) & ~FileAttributes.Hidden);
             AddUndo(job, "unzip", source, target);
@@ -890,6 +961,7 @@ public sealed class ExplorerJobService : BackgroundService
     {
         var entries = await _sevenZip.ListEntriesAsync(archivePath, cancellationToken);
         var stageRoot = Path.TrimEndingDirectorySeparator(Path.GetFullPath(staging));
+        ValidateExtractionSize(entries.Count, entries.Select(entry => entry.Size), ExtractionBudget(archivePath, staging));
         var destinations = new List<(SevenZipArchiveEntry Entry, string OutputPath)>();
         var seen = new Dictionary<string, bool>(StringComparer.OrdinalIgnoreCase);
 
@@ -899,20 +971,7 @@ public sealed class ExplorerJobService : BackgroundService
             if (entry.IsLink)
                 throw new InvalidDataException("Das 7-Zip-Archiv enthält eine Verknüpfung. Verknüpfungen werden aus Sicherheitsgründen nicht entpackt.");
 
-            var normalizedEntry = entry.Path.Replace('\\', '/');
-            if (normalizedEntry.StartsWith("/", StringComparison.Ordinal) || Path.IsPathRooted(normalizedEntry) || normalizedEntry.Contains(':'))
-                throw new InvalidDataException("Das 7-Zip-Archiv enthält einen ungültigen absoluten Pfad.");
-            var segments = normalizedEntry.Split('/', StringSplitOptions.None);
-            if (segments.Length == 0 || segments.Any(segment =>
-                    segment.Length == 0 || segment is "." or ".." || segment.EndsWith(' ') || segment.EndsWith('.') ||
-                    segment.IndexOfAny(Path.GetInvalidFileNameChars()) >= 0 || segment.IndexOfAny(['<', '>', ':', '"', '|', '?', '*']) >= 0))
-                throw new InvalidDataException("Das 7-Zip-Archiv enthält einen ungültigen oder unsicheren Dateinamen.");
-
-            var outputPath = Path.GetFullPath(Path.Combine(stageRoot, Path.Combine(segments)));
-            var relative = Path.GetRelativePath(stageRoot, outputPath);
-            if (relative == ".." || relative.StartsWith(".." + Path.DirectorySeparatorChar, StringComparison.Ordinal) || Path.IsPathRooted(relative))
-                throw new InvalidDataException("Das 7-Zip-Archiv versucht, Dateien außerhalb des Zielordners abzulegen.");
-            _ = PathAccessPolicy.NormalizeAbsolute(outputPath);
+            var outputPath = ResolveArchiveEntryPath(stageRoot, entry.Path, entry.IsDirectory);
 
             if (seen.TryGetValue(outputPath, out var existingIsDirectory))
             {
@@ -951,12 +1010,51 @@ public sealed class ExplorerJobService : BackgroundService
                 {
                     job.CompletedBytes += read;
                     PublishIfDue(job);
-                }, cancellationToken);
+                }, cancellationToken, expectedSize: entry.Size);
                 if (extracted != entry.Size)
                     throw new InvalidDataException("Die Dateigröße im 7-Zip-Archiv stimmt nicht mit dem gelesenen Inhalt überein.");
             }
             job.CompletedItems++;
             PublishIfDue(job);
+        }
+    }
+
+    private static string ResolveArchiveEntryPath(string root, string name, bool directory)
+    {
+        var normalized = name.Replace('\\', '/');
+        if (directory && normalized.EndsWith('/')) normalized = normalized[..^1];
+        var segments = normalized.Split('/');
+        try
+        {
+            foreach (var segment in segments) PathAccessPolicy.ValidateEntryName(segment);
+        }
+        catch (ArgumentException exception)
+        {
+            throw new InvalidDataException("Das Archiv enthält einen ungültigen oder unsicheren Dateinamen.", exception);
+        }
+        return Path.Combine(root, Path.Combine(segments));
+    }
+
+    private static long ExtractionBudget(string archivePath, string destination)
+    {
+        const long limit = 20L * 1024 * 1024 * 1024;
+        const long reserve = 512L * 1024 * 1024;
+        var compressed = new FileInfo(archivePath).Length;
+        var ratioBudget = Math.Max(128L * 1024 * 1024, Math.Min(compressed, limit) * 300);
+        var drive = Path.GetPathRoot(destination);
+        var available = drive is { Length: 3 } ? Math.Max(0, new DriveInfo(drive).AvailableFreeSpace - reserve) : limit;
+        return Math.Min(limit, Math.Min(ratioBudget, available));
+    }
+
+    private static void ValidateExtractionSize(int entries, IEnumerable<long> lengths, long budget)
+    {
+        if (entries > 10_000) throw new InvalidDataException("Archive mit mehr als 10.000 Einträgen werden nicht entpackt.");
+        long total = 0;
+        foreach (var length in lengths)
+        {
+            if (length < 0 || length > budget - total)
+                throw new InvalidDataException("Das Archiv überschreitet das Größenlimit, das Kompressionsverhältnis oder den verfügbaren Speicherplatz.");
+            total += length;
         }
     }
 
@@ -1018,13 +1116,41 @@ public sealed class ExplorerJobService : BackgroundService
         if (DateTimeOffset.UtcNow - job.LastPublish < TimeSpan.FromMilliseconds(180)) return;
         job.LastPublish = DateTimeOffset.UtcNow;
         Publish(job);
-        _ = PersistAsync(CancellationToken.None);
+        RequestCheckpoint();
     }
 
     private void Publish(JobState job)
     {
         var snapshot = job.Snapshot();
-        foreach (var channel in _subscribers.Values) channel.Writer.TryWrite(snapshot);
+        foreach (var subscriber in _subscribers.Values)
+            if (SameOwner(job.Owner, subscriber.Owner)) subscriber.Channel.Writer.TryWrite(snapshot);
+    }
+
+    private void RequestCheckpoint() => Interlocked.Exchange(ref _checkpointNeeded, 1);
+
+    private async Task CheckpointLoopAsync(CancellationToken stoppingToken)
+    {
+        using var timer = new PeriodicTimer(TimeSpan.FromSeconds(2));
+        try
+        {
+            while (await timer.WaitForNextTickAsync(stoppingToken))
+                if (Interlocked.Exchange(ref _checkpointNeeded, 0) != 0) await PersistCheckpointAsync();
+        }
+        catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested) { }
+        finally
+        {
+            if (Interlocked.Exchange(ref _checkpointNeeded, 0) != 0) await PersistCheckpointAsync();
+        }
+    }
+
+    private async Task PersistCheckpointAsync()
+    {
+        try { await PersistAsync(CancellationToken.None); }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+        {
+            _logger.LogWarning(exception, "Auftragsfortschritt konnte nicht gespeichert werden. Der Speichervorgang wird wiederholt.");
+            RequestCheckpoint();
+        }
     }
 
     private async Task PersistAsync(CancellationToken cancellationToken)
@@ -1032,8 +1158,10 @@ public sealed class ExplorerJobService : BackgroundService
         await _storeLock.WaitAsync(cancellationToken);
         try
         {
-            Directory.CreateDirectory(SettingsStore.DataDirectory);
-            PersistedJob[] jobs = _jobs.Values.Select(job => job.ToPersisted()).ToArray();
+            Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(_storePath))!);
+            var snapshots = _jobs.Values.Select(job => job.ToPersisted()).ToArray();
+            var jobs = snapshots.Where(job => IsTerminal(job.Status)).OrderBy(job => job.CreatedAt).TakeLast(200)
+                .Concat(snapshots.Where(job => !IsTerminal(job.Status))).ToArray();
             UndoRecord[] undo;
             lock (_undoLock) undo = _undo.ToArray();
             var document = new JobStoreDocument(jobs, undo);
@@ -1051,12 +1179,22 @@ public sealed class ExplorerJobService : BackgroundService
             if (!File.Exists(_storePath)) return;
             var document = JsonSerializer.Deserialize<JobStoreDocument>(File.ReadAllText(_storePath), JsonOptions);
             if (document is null) return;
-            foreach (var record in document.Jobs.TakeLast(200))
+            lock (_undoLock)
+            {
+                _undo.AddRange(document.Undo);
+                TrimUndoHistory();
+            }
+            foreach (var record in document.Jobs)
             {
                 var state = JobState.FromPersisted(record);
+                if (!IsTerminal(state.Status))
+                {
+                    state.Status = "cancelled";
+                    state.Message = "Beim Neustart unterbrochen. Starte den Auftrag bei Bedarf neu.";
+                    if (state.Kind != "undo-batch") AddUndoFor(state);
+                }
                 _jobs[state.Id] = state;
             }
-            lock (_undoLock) _undo.AddRange(document.Undo.TakeLast(50));
         }
         catch (Exception exception)
         {
@@ -1067,23 +1205,33 @@ public sealed class ExplorerJobService : BackgroundService
 
     private void AddUndoFor(JobState job)
     {
-        lock (job.Sync)
+        UndoRecord[] records;
+        lock (job.Sync) records = job.UndoActions.ToArray();
+        if (records.Length == 0) return;
+        lock (_undoLock)
         {
-            foreach (var undo in job.UndoActions) AddUndoRecord(undo);
+            if (_undo.Any(record => record.JobId == job.Id)) return;
+            _undo.AddRange(records);
+            TrimUndoHistory();
         }
     }
 
-    private void ConsumeUndoFor(JobState job)
+    private void ConsumeUndoStep(JobState job, OperationUndoAction action)
     {
-        string? sourceJobId;
-        lock (job.Sync) sourceJobId = job.UndoSourceJobId;
-        if (sourceJobId is null) return;
-        lock (_undoLock) _undo.RemoveAll(record => record.JobId == sourceJobId);
+        if (job.UndoSourceJobId is not { } sourceJobId) return;
+        lock (_undoLock)
+        {
+            var index = _undo.FindLastIndex(record => record.JobId == sourceJobId &&
+                SameOwner(record.Owner, job.Owner) && ToUndoAction(record) == action);
+            if (index >= 0) _undo.RemoveAt(index);
+        }
+        RequestCheckpoint();
     }
 
     private void AddUndo(JobState job, string kind, string original, string result)
     {
-        lock (job.Sync) job.UndoActions.Add(new UndoRecord(job.Id, kind, original, result, DateTimeOffset.UtcNow));
+        lock (job.Sync) job.UndoActions.Add(new UndoRecord(job.Id, kind, original, result, DateTimeOffset.UtcNow, job.Owner));
+        RequestCheckpoint();
     }
 
     private static bool TryDeleteMovedSource(CopyResult copy)
@@ -1101,7 +1249,7 @@ public sealed class ExplorerJobService : BackgroundService
         catch (UnauthorizedAccessException) { return false; }
     }
 
-    private static void UpdateUndoKind(JobState job, string resultPath, string kind)
+    private void UpdateUndoKind(JobState job, string resultPath, string kind)
     {
         lock (job.Sync)
         {
@@ -1110,24 +1258,33 @@ public sealed class ExplorerJobService : BackgroundService
                 var record = job.UndoActions[index];
                 if (record.Kind != "copy" || !string.Equals(record.ResultPath, resultPath, StringComparison.OrdinalIgnoreCase)) continue;
                 job.UndoActions[index] = record with { Kind = kind };
+                RequestCheckpoint();
                 return;
             }
         }
     }
 
-    private void AddUndoRecord(UndoRecord record)
+    private void TrimUndoHistory()
     {
-        lock (_undoLock)
+        var groups = _undo.GroupBy(record => record.JobId).ToArray();
+        var retainedSteps = _undo.Count;
+        var retainedJobs = groups.Length;
+        var discard = new HashSet<string>();
+        foreach (var group in groups)
         {
-            _undo.Add(record);
-            if (_undo.Count > 50) _undo.RemoveRange(0, _undo.Count - 50);
+            if (retainedJobs == 1 || (retainedJobs <= 50 && retainedSteps <= 50_000)) break;
+            if (_jobs.Values.Any(job => job.UndoSourceJobId == group.Key && !job.IsIdle)) continue;
+            discard.Add(group.Key);
+            retainedSteps -= group.Count();
+            retainedJobs--;
         }
+        if (discard.Count != 0) _undo.RemoveAll(record => discard.Contains(record.JobId));
     }
 
-    private List<string> EnumerateFiles(string source, CancellationToken cancellationToken)
+    private List<(string Path, bool Directory)> EnumerateArchiveItems(string source, CancellationToken cancellationToken)
     {
-        if (File.Exists(source)) return [source];
-        var result = new List<string>();
+        if (File.Exists(source)) return [(source, false)];
+        var result = new List<(string Path, bool Directory)> { (source, true) };
         var pending = new Stack<string>();
         pending.Push(source);
         while (pending.TryPop(out var directory))
@@ -1135,10 +1292,11 @@ public sealed class ExplorerJobService : BackgroundService
             cancellationToken.ThrowIfCancellationRequested();
             foreach (var child in Directory.EnumerateFileSystemEntries(directory))
             {
+                if (!_policy.IsAllowed(child)) continue;
                 var attributes = File.GetAttributes(child);
                 if ((attributes & FileAttributes.ReparsePoint) != 0) continue;
                 if ((attributes & FileAttributes.Directory) != 0) pending.Push(child);
-                else result.Add(child);
+                result.Add((child, (attributes & FileAttributes.Directory) != 0));
             }
         }
         return result;
@@ -1179,12 +1337,13 @@ public sealed class ExplorerJobService : BackgroundService
 
     private static bool IsTerminal(string status) => status is "completed" or "completed-with-skips" or "failed" or "cancelled";
 
-    private sealed class JobState(string id, string kind, OperationRequest request)
+    private sealed class JobState(string id, string kind, OperationRequest request, string? owner)
     {
         public object Sync { get; } = new();
         public string Id { get; } = id;
         public string Kind { get; } = kind;
         public OperationRequest Request { get; } = request;
+        public string? Owner { get; } = owner;
         public string Status { get; set; } = "queued";
         public string Message { get; set; } = "Wartet auf Verarbeitung";
         public string? Error { get; set; }
@@ -1204,6 +1363,7 @@ public sealed class ExplorerJobService : BackgroundService
         public bool CancelRequested { get; set; }
         public string? UndoSourceJobId { get; set; }
         public List<UndoRecord> UndoActions { get; } = [];
+        public bool IsIdle { get { lock (Sync) return IsTerminal(Status) && Cancellation is null; } }
 
         public JobSnapshot Snapshot()
         {
@@ -1220,14 +1380,19 @@ public sealed class ExplorerJobService : BackgroundService
 
         public PersistedJob ToPersisted()
         {
-            lock (Sync) return new PersistedJob(Id, Kind, Request, Status, Message, Error, CompletedBytes, TotalBytes,
-                CompletedItems, TotalItems, SkippedItems, CreatedAt, StartedAt, ConflictMode, UndoActions.ToArray(),
-                UndoSourceJobId);
+            lock (Sync)
+            {
+                var terminal = IsTerminal(Status);
+                var request = terminal ? new OperationRequest(Kind, []) : Request;
+                return new PersistedJob(Id, Kind, request, Status, Message, Error, CompletedBytes, TotalBytes,
+                    CompletedItems, TotalItems, SkippedItems, CreatedAt, StartedAt, ConflictMode,
+                    terminal ? [] : UndoActions.ToArray(), UndoSourceJobId, Owner);
+            }
         }
 
         public static JobState FromPersisted(PersistedJob record)
         {
-            var job = new JobState(record.Id, record.Kind, record.Request)
+            var job = new JobState(record.Id, record.Kind, record.Request, record.Owner)
             {
                 Status = record.Status,
                 Message = record.Message,
@@ -1242,7 +1407,7 @@ public sealed class ExplorerJobService : BackgroundService
                 ConflictMode = record.ConflictMode,
                 UndoSourceJobId = record.UndoSourceJobId
             };
-            job.UndoActions.AddRange(record.UndoActions);
+            job.UndoActions.AddRange(record.UndoActions ?? []);
             return job;
         }
     }
@@ -1250,10 +1415,12 @@ public sealed class ExplorerJobService : BackgroundService
     private sealed record TransferItem(string SourcePath, string TargetPath, bool IsDirectory, long Size, string SourceRoot, DateTime LastWriteTimeUtc);
     private sealed record CopyResult(string SourcePath, string TargetPath, long SourceLength, DateTime SourceLastWriteTimeUtc);
     private sealed record PendingFolderMoveCopy(string SourceRoot, string SourcePath, CopyResult Copy);
-    private sealed record UndoRecord(string JobId, string Kind, string OriginalPath, string ResultPath, DateTimeOffset CreatedAt);
+    private sealed record JobSubscriber(string? Owner, Channel<JobSnapshot> Channel);
+    private sealed record UndoRecord(string JobId, string Kind, string OriginalPath, string ResultPath, DateTimeOffset CreatedAt,
+        string? Owner = null);
     private sealed record JobStoreDocument(PersistedJob[] Jobs, UndoRecord[] Undo);
     private sealed record PersistedJob(string Id, string Kind, OperationRequest Request, string Status, string Message,
         string? Error, long CompletedBytes, long? TotalBytes, int CompletedItems, int? TotalItems, int SkippedItems,
         DateTimeOffset CreatedAt, DateTimeOffset? StartedAt, string? ConflictMode, UndoRecord[] UndoActions,
-        string? UndoSourceJobId = null);
+        string? UndoSourceJobId = null, string? Owner = null);
 }

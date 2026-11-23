@@ -1,6 +1,7 @@
 using System.Runtime.CompilerServices;
 using System.Reflection;
 using System.Runtime.InteropServices;
+using System.IO.Enumeration;
 using System.Threading.Channels;
 using Microsoft.CSharp.RuntimeBinder;
 using Microsoft.AspNetCore.StaticFiles;
@@ -32,30 +33,41 @@ public sealed class RecursiveSearchService
         if (!Directory.Exists(root)) throw new DirectoryNotFoundException();
         var text = query.Trim();
         if (text.Length < 1 || text.Length > 200) throw new ArgumentException("Gib einen Suchbegriff mit 1 bis 200 Zeichen ein.");
+        var searchQuery = new SearchQuery(text);
+        using var stopSearch = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         var channel = Channel.CreateBounded<FileEntryDto>(new BoundedChannelOptions(128)
         { FullMode = BoundedChannelFullMode.Wait, SingleReader = true, SingleWriter = true });
         var worker = Task.Run(async () =>
         {
             try
             {
-                await SearchWorkerAsync(root, text, showHidden, searchContent, extension, minSize, maxSize,
-                    modifiedAfter, modifiedBefore, channel.Writer, cancellationToken, showSystem, useWindowsSearchIndex);
+                await SearchWorkerAsync(root, searchQuery, showHidden, searchContent, extension, minSize, maxSize,
+                    modifiedAfter, modifiedBefore, channel.Writer, stopSearch.Token, showSystem, useWindowsSearchIndex);
                 channel.Writer.TryComplete();
             }
             catch (Exception exception) { channel.Writer.TryComplete(exception); }
-        }, cancellationToken);
+        });
 
-        await foreach (var item in channel.Reader.ReadAllAsync(cancellationToken)) yield return item;
-        await worker;
+        try
+        {
+            await foreach (var item in channel.Reader.ReadAllAsync(cancellationToken)) yield return item;
+        }
+        finally
+        {
+            await stopSearch.CancelAsync();
+            await worker;
+        }
     }
 
-    private async Task SearchWorkerAsync(string root, string query, bool showHidden, bool searchContent,
+    private async Task SearchWorkerAsync(string root, SearchQuery query, bool showHidden, bool searchContent,
         string? extension, long? minSize, long? maxSize, DateTimeOffset? modifiedAfter, DateTimeOffset? modifiedBefore,
         ChannelWriter<FileEntryDto> output, CancellationToken cancellationToken, bool showSystem, bool useWindowsSearchIndex)
     {
+        // Explicit file name patterns do not request document-content matches.
+        searchContent &= !query.IsPattern;
         if (!searchContent && await TrySearchEverythingAsync(root, query, showHidden, showSystem, extension,
                 minSize, maxSize, modifiedAfter, modifiedBefore, output, cancellationToken)) return;
-        if (useWindowsSearchIndex && await TrySearchWindowsIndexAsync(root, query, showHidden, showSystem, searchContent, extension, minSize,
+        if (!query.IsPattern && useWindowsSearchIndex && await TrySearchWindowsIndexAsync(root, query.Text, showHidden, showSystem, searchContent, extension, minSize,
                 maxSize, modifiedAfter, modifiedBefore, output, cancellationToken)) return;
 
         var pending = new Stack<string>();
@@ -71,6 +83,7 @@ public sealed class RecursiveSearchService
             foreach (var path in children)
             {
                 cancellationToken.ThrowIfCancellationRequested();
+                if (!TryGetSearchablePath(root, path, out _)) continue;
                 FileAttributes attributes;
                 try { attributes = File.GetAttributes(path); }
                 catch (IOException) { continue; }
@@ -80,7 +93,7 @@ public sealed class RecursiveSearchService
                 if (!showHidden && (attributes & FileAttributes.Hidden) != 0 || !showSystem && (attributes & FileAttributes.System) != 0) continue;
                 if (isDirectory)
                 {
-                    if (Path.GetFileName(path).Contains(query, StringComparison.CurrentCultureIgnoreCase))
+                    if (query.MatchesName(Path.GetFileName(path), isDirectory: true))
                         await output.WriteAsync(CreateEntry(path, true, attributes), cancellationToken);
                     pending.Push(path);
                     continue;
@@ -94,13 +107,19 @@ public sealed class RecursiveSearchService
                 catch (IOException) { continue; }
                 if (minSize.HasValue && info.Length < minSize || maxSize.HasValue && info.Length > maxSize) continue;
                 if (modifiedAfter.HasValue && info.LastWriteTimeUtc < modifiedAfter.Value.UtcDateTime || modifiedBefore.HasValue && info.LastWriteTimeUtc > modifiedBefore.Value.UtcDateTime) continue;
-                var matchesName = name.Contains(query, StringComparison.CurrentCultureIgnoreCase);
+                var matchesName = query.MatchesName(name, isDirectory: false);
                 if (!matchesName && searchContent && info.Length <= 4 * 1024 * 1024 && TextExtensions.Contains(ext))
                 {
                     try
                     {
-                        var content = await File.ReadAllTextAsync(path, cancellationToken);
-                        matchesName = content.Contains(query, StringComparison.CurrentCultureIgnoreCase);
+                        await using var input = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read,
+                            4096, FileOptions.Asynchronous | FileOptions.SequentialScan);
+                        if (input.Length <= 4 * 1024 * 1024)
+                        {
+                            using var reader = new StreamReader(input);
+                            var content = await reader.ReadToEndAsync(cancellationToken);
+                            matchesName = content.Contains(query.Text, StringComparison.CurrentCultureIgnoreCase);
+                        }
                     }
                     catch (Exception exception) when (exception is IOException or UnauthorizedAccessException) { }
                 }
@@ -109,11 +128,12 @@ public sealed class RecursiveSearchService
         }
     }
 
-    private async Task<bool> TrySearchEverythingAsync(string root, string query, bool showHidden, bool showSystem,
+    private async Task<bool> TrySearchEverythingAsync(string root, SearchQuery query, bool showHidden, bool showSystem,
         string? extension, long? minSize, long? maxSize, DateTimeOffset? modifiedAfter, DateTimeOffset? modifiedBefore,
         ChannelWriter<FileEntryDto> output, CancellationToken cancellationToken)
     {
-        if (everything?.IsAvailable != true) return false;
+        var indexQuery = query.EverythingText;
+        if (indexQuery is null || everything?.IsAvailable != true) return false;
         var wantedExtension = string.IsNullOrWhiteSpace(extension) ? null : extension.StartsWith('.') ? extension : "." + extension;
         var offset = 0;
         var emittedAny = false;
@@ -123,14 +143,13 @@ public sealed class RecursiveSearchService
             {
                 cancellationToken.ThrowIfCancellationRequested();
                 var pageCount = 0;
-                await foreach (var indexedPath in everything.SearchPathsAsync(root, query, offset, EverythingPageSize, cancellationToken))
+                await foreach (var indexedPath in everything.SearchPathsAsync(root, indexQuery, offset, EverythingPageSize, cancellationToken))
                 {
                     cancellationToken.ThrowIfCancellationRequested();
                     pageCount++;
                     try
                     {
-                        var candidate = policy.Authorize(indexedPath);
-                        if (!IsWithinRoot(root, candidate) || candidate.Equals(root, StringComparison.OrdinalIgnoreCase)) continue;
+                        if (!TryGetSearchablePath(root, indexedPath, out var candidate)) continue;
                         var attributes = File.GetAttributes(candidate);
                         var isDirectory = (attributes & FileAttributes.Directory) != 0;
                         if ((attributes & FileAttributes.ReparsePoint) != 0 ||
@@ -138,7 +157,7 @@ public sealed class RecursiveSearchService
                             !showSystem && (attributes & FileAttributes.System) != 0) continue;
 
                         var name = Path.GetFileName(candidate.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar));
-                        if (!name.Contains(query, StringComparison.CurrentCultureIgnoreCase)) continue;
+                        if (!query.MatchesName(name, isDirectory)) continue;
                         if (isDirectory)
                         {
                             await output.WriteAsync(CreateEntry(candidate, true, attributes), cancellationToken);
@@ -157,7 +176,7 @@ public sealed class RecursiveSearchService
                     catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or ArgumentException or NotSupportedException) { }
                 }
 
-                if (pageCount < EverythingPageSize) break;
+                if (pageCount < EverythingPageSize || offset > int.MaxValue - pageCount) break;
                 offset += pageCount;
             }
             return emittedAny;
@@ -218,8 +237,7 @@ public sealed class RecursiveSearchService
                 {
                     try
                     {
-                        var candidate = policy.Authorize(indexedPath);
-                        if (IsWithinRoot(root, candidate) && !candidate.Equals(root, StringComparison.OrdinalIgnoreCase))
+                        if (TryGetSearchablePath(root, indexedPath, out var candidate))
                         {
                             var attributes = File.GetAttributes(candidate);
                             var isDirectory = (attributes & FileAttributes.Directory) != 0;
@@ -274,6 +292,59 @@ public sealed class RecursiveSearchService
     }
 
     private static string EscapeSqlLiteral(string value) => value.Replace("'", "''", StringComparison.Ordinal);
+
+    private bool TryGetSearchablePath(string root, string path, out string lexical)
+    {
+        lexical = "";
+        try
+        {
+            lexical = policy.Authorize(path, resolveLinks: false);
+            return IsWithinRoot(root, lexical) && !lexical.Equals(root, StringComparison.OrdinalIgnoreCase) &&
+                policy.Authorize(lexical).Equals(lexical, StringComparison.OrdinalIgnoreCase);
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or ArgumentException or NotSupportedException)
+        {
+            return false;
+        }
+    }
+
+    private sealed class SearchQuery
+    {
+        private readonly string[]? _extensions;
+        private readonly bool _wildcard;
+
+        public SearchQuery(string text)
+        {
+            Text = text;
+            if (text.StartsWith("ext:", StringComparison.OrdinalIgnoreCase))
+            {
+                var extensions = text[4..].Split(';');
+                if (extensions.All(IsExtension)) _extensions = extensions;
+            }
+            else if (text.StartsWith("*.", StringComparison.Ordinal) && IsExtension(text[2..]))
+                _extensions = [text[2..]];
+            var safeForIndex = text.All(character =>
+                !char.IsControl(character) && character is not ('\\' or '/' or ':' or '"' or '|' or '<' or '>' or '!' or '&'));
+            _wildcard = text.IndexOfAny(['*', '?']) >= 0 && safeForIndex;
+            if (IsPattern || safeForIndex)
+                EverythingText = text.Contains(' ') ? '"' + text + '"' : text;
+        }
+
+        public string Text { get; }
+        public bool IsPattern => _wildcard || _extensions is not null;
+        public string? EverythingText { get; }
+
+        private static bool IsExtension(string value) => value.Length > 0 &&
+            value.All(character => char.IsLetterOrDigit(character) || character is '_' or '-');
+
+        public bool MatchesName(string name, bool isDirectory)
+        {
+            if (_extensions is not null)
+                return !isDirectory && _extensions.Contains(Path.GetExtension(name).TrimStart('.'), StringComparer.OrdinalIgnoreCase);
+            if (_wildcard) return FileSystemName.MatchesSimpleExpression(Text, name);
+            return name.Contains(Text, StringComparison.CurrentCultureIgnoreCase);
+        }
+    }
 
     private static string EscapeLikePattern(string value) => value
         .Replace("[", "[[]", StringComparison.Ordinal)

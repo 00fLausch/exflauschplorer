@@ -89,6 +89,8 @@ try {
     $tailscale = Get-TailscaleExe
     $tailnetStatus = Get-TailscaleStatus $tailscale
     if ($tailnetStatus.BackendState -ne 'Running') { throw 'Tailscale ist derzeit nicht verbunden. Verbinde diesen PC mit deinem Tailnet und starte das Setup erneut.' }
+    $dnsName = ([string]$tailnetStatus.Self.DNSName).TrimEnd('.')
+    if ($dnsName -notmatch '^[a-z0-9][a-z0-9.-]*\.ts\.net$') { throw 'Der Tailscale-MagicDNS-Name für diesen PC fehlt.' }
 
     if ([string]::IsNullOrWhiteSpace($AllowedLogin)) { $AllowedLogin = Get-CurrentTailnetLogin $tailnetStatus }
     if ([string]::IsNullOrWhiteSpace($AllowedLogin)) { $AllowedLogin = Read-Host 'Tailscale-Anmeldename, der Zugriff auf den Datei-Explorer erhalten soll' }
@@ -137,8 +139,8 @@ try {
         $shareEverything = [bool]$savedSettings.ShareAllDrives
     }
     else {
-        $answer = Read-Host 'Alle lokalen, USB- und Netzlaufwerke freigeben? (J/n; Enter = Ja)'
-        $shareEverything = $answer -notmatch '^(n|nein)$'
+        $answer = Read-Host 'Alle lokalen, USB- und Netzlaufwerke freigeben? (j/N; Enter = Nein)'
+        $shareEverything = $answer -match '^(j|ja|y|yes)$'
     }
 
     if ($ShareRoot.Count -gt 0) {
@@ -186,14 +188,21 @@ try {
         }
         $identityHeaders = @{ 'Tailscale-User-Login' = $statusLogin }
         try {
-            $jobSnapshots = @(Invoke-RestMethod -Uri "http://127.0.0.1:$httpPort/api/v1/jobs" -Headers $identityHeaders -TimeoutSec 4)
-            $uploadSessions = @(Invoke-RestMethod -Uri "http://127.0.0.1:$httpPort/api/v1/uploads" -Headers $identityHeaders -TimeoutSec 4)
+            if ($savedSettings.localSetupToken) {
+                $activity = Invoke-RestMethod -Uri "http://127.0.0.1:$httpPort/api/v1/local-setup" -Headers @{ 'X-Explorer-Setup' = $savedSettings.localSetupToken } -TimeoutSec 4
+                $activeJobs = [int]$activity.activeJobs
+                $activeUploads = [int]$activity.activeUploads
+            }
+            else {
+                $jobSnapshots = @(Invoke-RestMethod -Uri "http://127.0.0.1:$httpPort/api/v1/jobs" -Headers $identityHeaders -TimeoutSec 4)
+                $uploadSessions = @(Invoke-RestMethod -Uri "http://127.0.0.1:$httpPort/api/v1/uploads" -Headers $identityHeaders -TimeoutSec 4)
+                $activeJobs = @($jobSnapshots | Where-Object { $_.status -in @('queued', 'running', 'paused', 'conflict') }).Count
+                $activeUploads = @($uploadSessions | Where-Object { $_.state -in @('uploading', 'ready') }).Count
+            }
         }
         catch { throw 'Die laufende App konnte vor dem Update nicht auf aktive Datei- und Uploadvorgänge geprüft werden. Sie wurde nicht verändert.' }
-        $activeJobs = @($jobSnapshots | Where-Object { $_.status -in @('queued', 'running', 'paused', 'conflict') })
-        $activeUploads = @($uploadSessions | Where-Object { $_.state -in @('uploading', 'ready') })
-        if ($activeJobs.Count -gt 0 -or $activeUploads.Count -gt 0) {
-            throw "Das Update wartet: Es laufen noch $($activeJobs.Count) Datei- und $($activeUploads.Count) Uploadvorgänge. Beende oder pausiere sie und starte setup.ps1 erneut."
+        if ($activeJobs -gt 0 -or $activeUploads -gt 0) {
+            throw "Das Update wartet: Es laufen noch $activeJobs Datei- und $activeUploads Uploadvorgänge. Beende sie und starte setup.ps1 erneut."
         }
         foreach ($processInfo in $watchdogProcesses) { Stop-Process -Id $processInfo.ProcessId -Force }
         $watchdogProcesses = @()
@@ -226,6 +235,12 @@ try {
     }
     $settings['port'] = $httpPort
     $settings['tailscaleHttpsPort'] = $httpsPort
+    $settings['tailscaleHostName'] = $dnsName
+    # Only the Windows user who can read the settings file can query local setup status.
+    $tokenBytes = New-Object byte[] 32
+    $random = [Security.Cryptography.RandomNumberGenerator]::Create()
+    try { $random.GetBytes($tokenBytes) } finally { $random.Dispose() }
+    $settings['localSetupToken'] = [BitConverter]::ToString($tokenBytes).Replace('-', '')
     $settings['allowedLogins'] = $allowedLogins
     $settings['shareAllDrives'] = $shareEverything
     $settings['roots'] = $roots
@@ -245,12 +260,12 @@ try {
     else { Remove-ItemProperty -Path $runKey -Name 'WindowsMobileExplorer' -ErrorAction SilentlyContinue }
 
     $process = Start-Process -FilePath $exePath -WorkingDirectory $installRoot -WindowStyle Hidden -PassThru
-    $healthUri = "http://127.0.0.1:$httpPort/api/v1/health"
+    $healthUri = "http://127.0.0.1:$httpPort/api/v1/local-setup"
     $ready = $false
     for ($attempt = 0; $attempt -lt 30; $attempt++) {
         if ($process -and $process.HasExited) { throw 'Die Tray-App wurde beim Start beendet. Prüfe die Protokolle unter %LOCALAPPDATA%\WindowsMobileExplorer\logs.' }
         try {
-            $health = Invoke-RestMethod -Uri $healthUri -Headers @{ 'Tailscale-User-Login' = $AllowedLogin } -TimeoutSec 2
+            $health = Invoke-RestMethod -Uri $healthUri -Headers @{ 'X-Explorer-Setup' = $settings['localSetupToken'] } -TimeoutSec 2
             if ($health.ok) { $ready = $true; break }
         }
         catch { Start-Sleep -Milliseconds 500 }
@@ -280,18 +295,18 @@ try {
         if ($serveOutput -match 'Serve is not enabled on your tailnet') {
             $approvalLink = [regex]::Match($serveOutput, 'https://login\.tailscale\.com/f/serve\?[^\s]+').Value
             $linkText = if ($approvalLink) { " Öffne $approvalLink, aktiviere Serve für dieses Tailnet und führe setup.ps1 danach erneut aus." } else { ' Aktiviere Serve im Tailnet und führe setup.ps1 danach erneut aus.' }
-            throw "Tailscale Serve ist noch nicht für dieses Tailnet freigegeben.$linkText Die App bleibt bis dahin ausschließlich auf 127.0.0.1 erreichbar."
+            throw "Tailscale Serve ist noch nicht für dieses Tailnet freigegeben.$linkText Die Web-App ist bis zur Freigabe nicht erreichbar."
         }
         if (-not $serveExited) { throw 'Tailscale Serve hat innerhalb von 10 Sekunden nicht geantwortet. Der Setup-Aufruf wurde beendet; es wurde kein Funnel eingerichtet.' }
         if ($serveProcess.ExitCode -ne 0) {
-            throw "Tailscale Serve konnte nicht eingerichtet werden. Die App bleibt ausschließlich auf 127.0.0.1 erreichbar. Tailscale meldet: $serveOutput"
+            throw "Tailscale Serve konnte nicht eingerichtet werden. Die Web-App ist ohne den Proxy nicht erreichbar. Tailscale meldet: $serveOutput"
         }
     }
     finally { $serveProcess.Dispose() }
 
     $confirmedServe = (& $tailscale serve status 2>&1 | Out-String)
     if (-not [regex]::IsMatch($confirmedServe, "(?ms)https://[^`r`n]*:$httpsPort\b[^`r`n]*(?:`r?`n[^`r`n]*){0,3}127\.0\.0\.1:$httpPort\b")) {
-        throw 'Tailscale Serve hat den Proxy nicht bestätigt. Die App bleibt ausschließlich auf 127.0.0.1 erreichbar.'
+        throw 'Tailscale Serve hat den Proxy nicht bestätigt. Die Web-App ist ohne den Proxy nicht erreichbar.'
     }
     $confirmedFunnel = (& $tailscale funnel status 2>&1 | Out-String)
     if (Test-FunnelForLocalPort $confirmedFunnel $httpPort) {

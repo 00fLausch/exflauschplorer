@@ -120,7 +120,7 @@ export const explorerApi = {
     }
     return await response.json() as { id: string; offset: number; complete: boolean }
   },
-  commitUpload: (id: string, conflictMode?: string) => apiRequest<UploadCommitResult>(`/uploads/${encodeURIComponent(id)}/commit`, { method: 'POST', body: JSON.stringify({ conflictMode }) }),
+  commitUpload: (id: string, conflictMode?: string, expectedSha256?: string, signal?: AbortSignal) => apiRequest<UploadCommitResult>(`/uploads/${encodeURIComponent(id)}/commit`, { method: 'POST', body: JSON.stringify({ conflictMode, expectedSha256 }), signal }),
   cancelUpload: (id: string) => apiRequest<void>(`/uploads/${encodeURIComponent(id)}`, { method: 'DELETE' }),
 }
 

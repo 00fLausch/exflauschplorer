@@ -83,7 +83,7 @@ test('iPhone PWA navigates a shared folder and edits a text file', async ({ page
   }
 
   await page.getByRole('button', { name: 'Mehr', exact: true }).click()
-  await page.getByRole('button', { name: 'Einstellungen', exact: true }).click()
+  await page.getByRole('button', { name: /^Einstellungen/ }).click()
   const settingsDialog = page.getByRole('dialog', { name: 'Einstellungen' })
   await expect(settingsDialog).toBeVisible()
   await expectMobileControls(page)
@@ -149,7 +149,7 @@ test('iPhone PWA navigates a shared folder and edits a text file', async ({ page
   await page.getByRole('button', { name: 'Mehr', exact: true }).click()
 
   await page.getByRole('button', { name: 'Mehr', exact: true }).click()
-  await page.getByRole('button', { name: 'Zuletzt', exact: true }).click()
+  await page.getByRole('button', { name: /^Zuletzt/ }).click()
   await expect(page.getByRole('heading', { name: 'Zuletzt am PC verwendet' })).toBeVisible()
   await expect(page.getByRole('button', { name: 'Datei touchprobe.svg' })).toBeVisible()
   const windowsRecent = await request.get(`${baseURL}/api/v1/windows-recent`)

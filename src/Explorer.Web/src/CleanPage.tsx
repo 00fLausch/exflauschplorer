@@ -72,7 +72,7 @@ export function CleanPage() {
 function CleanConfirmation({ items, bytes, busy, onCancel, onConfirm }: { items: CleanItem[]; bytes: number; busy: boolean; onCancel: () => void; onConfirm: () => void }) {
   const ref = useModalDialogFocus<HTMLDivElement>(onCancel)
   return <div className="modal-backdrop" onClick={onCancel}><div ref={ref} className="clean-confirm" role="dialog" aria-modal="true" aria-labelledby="clean-confirm-title" tabIndex={-1} onClick={event => event.stopPropagation()}>
-    <h2 id="clean-confirm-title">Dateien endgültig löschen?</h2><p>{items.length} ausgewählte Dateien · {formatBytes(bytes)}. Die Dateien werden nicht in den Papierkorb verschoben.</p>
+    <h2 id="clean-confirm-title">Ausgewählte Dateien aufräumen?</h2><p>{items.length} Dateien · {formatBytes(bytes)}. Temporäre Dateien und unvollständige Downloads gehen in den Papierkorb. Cache-Dateien werden endgültig gelöscht.</p>
     <details><summary>Ausgewählte Dateien prüfen</summary><ul>{items.map(item => <li key={item.id}>{item.path}</li>)}</ul></details>
     <div className="dialog-actions"><button className="secondary-button" data-dialog-initial-focus disabled={busy} onClick={onCancel}>Abbrechen</button><button className="primary-button" disabled={busy} onClick={onConfirm}>{busy ? <LoaderCircle className="spin" size={16} /> : <Check size={16} />}Endgültig löschen</button></div>
   </div></div>

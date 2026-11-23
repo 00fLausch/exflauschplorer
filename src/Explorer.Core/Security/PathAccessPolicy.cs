@@ -15,9 +15,11 @@ public sealed class PathAccessPolicy
     };
 
     private IReadOnlyList<ShareRoot> _roots = Array.Empty<ShareRoot>();
+    private readonly IReadOnlyList<string> _blockedPaths;
 
-    public PathAccessPolicy(IEnumerable<ShareRoot> roots)
+    public PathAccessPolicy(IEnumerable<ShareRoot> roots, IEnumerable<string>? blockedPaths = null)
     {
+        _blockedPaths = (blockedPaths ?? []).Select(NormalizeAbsolute).Distinct(PathComparer).ToArray();
         ReplaceRoots(roots);
     }
 
@@ -32,10 +34,11 @@ public sealed class PathAccessPolicy
         Volatile.Write(ref _roots, Array.AsReadOnly(normalizedRoots));
     }
 
-    public string Authorize(string path, bool write = false, bool resolveLinks = true)
+    public string Authorize(string path, bool write = false, bool resolveLinks = true, bool allowInternal = false)
     {
         var roots = Roots;
         var fullPath = NormalizeAbsolute(path);
+        RejectBlocked(fullPath, allowInternal);
         var root = FindRoot(roots, fullPath) ?? throw new UnauthorizedAccessException("Der Pfad liegt außerhalb der freigegebenen Ordner.");
         if (write && root.ReadOnly)
             throw new UnauthorizedAccessException("Dieser Ordner ist schreibgeschützt freigegeben.");
@@ -43,11 +46,50 @@ public sealed class PathAccessPolicy
         if (!resolveLinks)
             return fullPath;
 
-        var resolved = ResolveExistingLinks(fullPath, root, roots);
+        var resolved = ResolveExistingLinks(fullPath, roots, allowInternal);
+        RejectBlocked(resolved, allowInternal);
         var resolvedRoot = FindRoot(roots, resolved) ?? throw new UnauthorizedAccessException("Der Pfad führt über eine Verknüpfung aus den freigegebenen Ordnern heraus.");
         if (write && resolvedRoot.ReadOnly)
             throw new UnauthorizedAccessException("Das Ziel dieser Verknüpfung ist schreibgeschützt.");
         return resolved;
+    }
+
+    // Entry mutations act on the final name. Only its parent may be resolved.
+    public string AuthorizeEntryMutation(string path, bool allowInternal = false)
+    {
+        var lexical = Authorize(path, write: true, resolveLinks: false, allowInternal: allowInternal);
+        EnsureMutableEntry(lexical);
+        var parent = Authorize(Path.GetDirectoryName(lexical)!, write: true);
+        var entry = Authorize(Path.Combine(parent, Path.GetFileName(lexical)), write: true, resolveLinks: false, allowInternal: allowInternal);
+        EnsureMutableEntry(entry);
+        return entry;
+    }
+
+    private void EnsureMutableEntry(string path)
+    {
+        if (PathComparer.Equals(path, Path.TrimEndingDirectorySeparator(Path.GetPathRoot(path)!)) ||
+            Roots.Any(root => IsWithin(path, root.Path)) ||
+            _blockedPaths.Any(blocked => IsWithin(path, blocked)))
+            throw new UnauthorizedAccessException("Laufwerke, Freigabewurzeln und übergeordnete Ordner geschützter Bereiche sind gesperrt.");
+    }
+
+    private void RejectBlocked(string path, bool allowInternal)
+    {
+        if (_blockedPaths.Any(blocked => IsWithin(blocked, path)) ||
+            (!allowInternal && path.Split([Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar])
+                .Any(IsInternalEntryName)))
+            throw new UnauthorizedAccessException("Dieser private Windows-Bereich ist für den Datei-Explorer gesperrt.");
+    }
+
+    public static bool IsInternalEntryName(string name) => name.StartsWith(".wme-", StringComparison.OrdinalIgnoreCase);
+
+    public static string ValidateEntryName(string? name)
+    {
+        if (string.IsNullOrWhiteSpace(name) || name.Length > 255 || name.EndsWith('.') || name.EndsWith(' ') ||
+            name.IndexOfAny(['\\', '/', ':', '"', '<', '>', '|', '?', '*']) >= 0 || name.Any(char.IsControl) ||
+            IsInternalEntryName(name) || ReservedNames.Contains(name.Split('.')[0].TrimEnd(' ')))
+            throw new ArgumentException("Der Name muss ein einzelner gültiger Windows-Datei- oder Ordnername sein.");
+        return name;
     }
 
     public bool IsAllowed(string path, bool write = false)
@@ -78,13 +120,18 @@ public sealed class PathAccessPolicy
         if (string.IsNullOrWhiteSpace(path) || path.IndexOf('\0') >= 0)
             throw new ArgumentException("Bitte gib einen gültigen Pfad ein.", nameof(path));
 
-        var candidate = path.Trim();
+        var candidate = path;
         if (candidate.StartsWith("\\\\?\\UNC\\", StringComparison.OrdinalIgnoreCase))
             candidate = "\\\\" + candidate[8..];
         else if (candidate.StartsWith("\\\\?\\", StringComparison.Ordinal))
             candidate = candidate[4..];
 
+        if (!Path.IsPathFullyQualified(candidate) || candidate.StartsWith(@"\\.\", StringComparison.Ordinal))
+            throw new ArgumentException("Bitte gib einen absoluten Windows-Pfad ein.", nameof(path));
+        ValidateSegments(candidate);
         var fullPath = ExpandShortPathNames(Path.GetFullPath(candidate));
+        if (fullPath.StartsWith(@"\\.\", StringComparison.Ordinal))
+            throw new ArgumentException("Windows-Gerätepfade sind gesperrt.", nameof(path));
         ValidateSegments(fullPath);
         return Path.TrimEndingDirectorySeparator(fullPath);
     }
@@ -126,14 +173,11 @@ public sealed class PathAccessPolicy
         return path.StartsWith(prefix, StringComparison.OrdinalIgnoreCase);
     }
 
-    private string ResolveExistingLinks(string fullPath, ShareRoot lexicalRoot, IReadOnlyList<ShareRoot> roots)
+    private string ResolveExistingLinks(string fullPath, IReadOnlyList<ShareRoot> roots, bool allowInternal)
     {
-        var relative = Path.GetRelativePath(lexicalRoot.Path, fullPath);
-        if (relative == ".")
-            return fullPath;
-
-        var current = lexicalRoot.Path;
-        var segments = relative.Split([Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar], StringSplitOptions.RemoveEmptyEntries);
+        // Walk from the drive/share root so a configured root cannot hide a junction.
+        var current = Path.GetPathRoot(fullPath)!;
+        var segments = fullPath[current.Length..].Split([Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar], StringSplitOptions.RemoveEmptyEntries);
         for (var index = 0; index < segments.Length; index++)
         {
             current = Path.Combine(current, segments[index]);
@@ -153,6 +197,9 @@ public sealed class PathAccessPolicy
                 break;
             }
 
+            // Expand intermediate 8.3 names even if the final entry does not exist yet.
+            current = NormalizeAbsolute(current);
+            RejectBlocked(current, allowInternal);
             if ((attributes & FileAttributes.ReparsePoint) == 0)
                 continue;
 
@@ -166,6 +213,7 @@ public sealed class PathAccessPolicy
             if (target is null)
                 continue;
             var targetPath = NormalizeAbsolute(target.FullName);
+            RejectBlocked(targetPath, allowInternal);
             if (FindRoot(roots, targetPath) is null)
                 throw new UnauthorizedAccessException("Der Pfad führt über eine Verknüpfung aus den freigegebenen Ordnern heraus.");
 
@@ -180,10 +228,12 @@ public sealed class PathAccessPolicy
 
     private static void ValidateSegments(string fullPath)
     {
-        foreach (var segment in fullPath.Split([Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar], StringSplitOptions.RemoveEmptyEntries))
+        foreach (var segment in fullPath[Path.GetPathRoot(fullPath)!.Length..]
+                     .Split([Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar], StringSplitOptions.RemoveEmptyEntries))
         {
+            if (segment is "." or "..") continue;
             var stem = segment.Split('.')[0].TrimEnd(' ', '.');
-            if (ReservedNames.Contains(stem))
+            if (segment.Contains(':') || segment.EndsWith(' ') || segment.EndsWith('.') || ReservedNames.Contains(stem))
                 throw new ArgumentException($"„{stem}“ ist ein reservierter Windows-Name.", nameof(fullPath));
         }
     }

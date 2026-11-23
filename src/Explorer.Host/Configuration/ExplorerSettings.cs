@@ -9,8 +9,10 @@ public sealed class ExplorerSettings
 
     public int Port { get; set; } = 5180;
     public int TailscaleHttpsPort { get; set; } = 8443;
+    public string? TailscaleHostName { get; set; }
+    public string? LocalSetupToken { get; set; }
     public List<string> AllowedLogins { get; set; } = [];
-    public bool ShareAllDrives { get; set; } = true;
+    public bool ShareAllDrives { get; set; }
     public List<ConfiguredRoot> Roots { get; set; } = [];
     public bool ReadOnlyMode { get; set; }
     public bool ProtectSystemFolders { get; set; } = true;
@@ -103,7 +105,30 @@ public static class SettingsStore
 
     public static PathAccessPolicy CreatePolicy(ExplorerSettings settings)
     {
-        return new PathAccessPolicy(CreateRoots(settings));
+        var profile = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+        var local = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+        var roaming = Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData);
+        var blocked = new List<string> { DataDirectory };
+        if (!string.IsNullOrEmpty(profile))
+            blocked.AddRange([Path.Combine(profile, ".ssh"), Path.Combine(profile, ".gnupg")]);
+        if (!string.IsNullOrEmpty(local))
+            blocked.AddRange([
+                Path.Combine(local, "Programs", "WindowsMobileExplorer"),
+                Path.Combine(local, "Google", "Chrome", "User Data"),
+                Path.Combine(local, "Microsoft", "Edge", "User Data"),
+                Path.Combine(local, "BraveSoftware", "Brave-Browser", "User Data"),
+                Path.Combine(local, "Vivaldi", "User Data")]);
+        if (!string.IsNullOrEmpty(roaming))
+            blocked.AddRange([Path.Combine(roaming, "Mozilla", "Firefox", "Profiles"),
+                Path.Combine(roaming, "Opera Software")]);
+        foreach (var folder in new[] { Environment.SpecialFolder.Startup, Environment.SpecialFolder.CommonStartup })
+        {
+            var path = Environment.GetFolderPath(folder, Environment.SpecialFolderOption.DoNotVerify);
+            if (!string.IsNullOrEmpty(path)) blocked.Add(path);
+        }
+        foreach (var drive in DriveInfo.GetDrives())
+            blocked.AddRange([Path.Combine(drive.Name, "$Recycle.Bin"), Path.Combine(drive.Name, "System Volume Information")]);
+        return new PathAccessPolicy(CreateRoots(settings), blocked);
     }
 
     public static IReadOnlyList<ShareRoot> CreateRoots(ExplorerSettings settings)

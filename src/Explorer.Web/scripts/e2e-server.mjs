@@ -110,7 +110,7 @@ try {
   await run(process.execPath, [npmCli, 'run', 'build'], { cwd: webDir })
   if (configuredHostDll) await access(hostDll)
   else await run(dotnetExe, ['build', path.join(repoRoot, 'src', 'Explorer.Host', 'Explorer.Host.csproj'), '--no-restore'], { cwd: repoRoot })
-  app = spawn(dotnetExe, [hostDll], {
+  app = spawn(dotnetExe, [hostDll, '--isolated-e2e'], {
     cwd: path.dirname(hostDll),
     windowsHide: true,
     stdio: ['ignore', 'pipe', 'pipe'],

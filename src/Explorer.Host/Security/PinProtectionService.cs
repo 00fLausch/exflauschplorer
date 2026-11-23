@@ -43,6 +43,15 @@ public sealed class PinProtectionService(
         return string.Equals(session.Identity, identity, StringComparison.OrdinalIgnoreCase);
     }
 
+    internal TimeSpan? SessionRemaining(string identity, string? sessionToken)
+    {
+        if (!IsConfigured) return null;
+        if (sessionToken is null || !_sessions.TryGetValue(sessionToken, out var session) ||
+            !string.Equals(session.Identity, identity, StringComparison.OrdinalIgnoreCase)) return TimeSpan.Zero;
+        var remaining = session.ExpiresAt - _timeProvider.GetUtcNow();
+        return remaining > TimeSpan.Zero ? remaining : TimeSpan.Zero;
+    }
+
     public PinResult Configure(string identity, string? pin, string? existingToken)
     {
         if (string.IsNullOrWhiteSpace(identity)) return Failure("identity_missing", "Die Tailscale-Anmeldung konnte nicht geprüft werden.", StatusCodes.Status401Unauthorized);

@@ -8,7 +8,8 @@ export function renderMarkdownPreview(source: string, documentPath: string): str
     const imagePath = resolveRelativeImagePath(documentPath, href)
     if (!imagePath) return alt ? `<span>${escapeHtml(alt)}</span>` : ''
     const titleAttribute = title ? ` title="${escapeHtml(title)}"` : ''
-    return `<img src="${escapeHtml(explorerApi.streamPathUrl(imagePath))}" alt="${escapeHtml(alt)}"${titleAttribute} loading="lazy">`
+    const src = imagePath.toLowerCase().endsWith('.svg') ? explorerApi.thumbnailUrl(imagePath, 1024) : explorerApi.streamPathUrl(imagePath)
+    return `<img src="${escapeHtml(src)}" alt="${escapeHtml(alt)}"${titleAttribute} loading="lazy">`
   }
 
   const rendered = marked.parse(source, { renderer, async: false })
@@ -21,7 +22,7 @@ export function renderMarkdownPreview(source: string, documentPath: string): str
 
   for (const image of parsed.querySelectorAll<HTMLImageElement>('img')) {
     const imageSource = image.getAttribute('src') ?? ''
-    if (!imageSource.startsWith('/api/v1/stream?path=')) {
+    if (!imageSource.startsWith('/api/v1/stream?path=') && !imageSource.startsWith('/api/v1/thumbnail?path=')) {
       const alt = image.getAttribute('alt') ?? ''
       if (alt) image.replaceWith(parsed.createTextNode(alt))
       else image.remove()

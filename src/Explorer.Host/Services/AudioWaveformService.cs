@@ -13,6 +13,7 @@ public sealed class AudioWaveformService : IAsyncDisposable
 {
     public const int PeakCount = 1200;
     private const int SampleRate = 8000;
+    private const int PendingCapacity = 8;
     private const string InputFormats = "aac,ac3,aiff,ape,asf,au,avi,flac,flv,matroska,webm,mov,mp4,m4a,3gp,3g2,mj2,mp3,mpeg,mpegts,ogg,wav,wv";
     private readonly PathAccessPolicy _policy;
     private readonly string? _ffmpeg;
@@ -69,6 +70,8 @@ public sealed class AudioWaveformService : IAsyncDisposable
                     .ThenBy(item => item.Value.LastUsed).First();
                 Remove(oldest.Key, oldest.Value);
             }
+            var incomplete = _cache.Where(item => !item.Value.Work.IsCompleted).OrderBy(item => item.Value.LastUsed).ToArray();
+            if (incomplete.Length >= PendingCapacity) Remove(incomplete[0].Key, incomplete[0].Value);
             var cancellation = CancellationTokenSource.CreateLinkedTokenSource(_shutdown.Token);
             var work = Task.Run(() => AnalyzeAsync(absolute, cancellation.Token));
             _pendingJobs.Add(work);
@@ -92,8 +95,8 @@ public sealed class AudioWaveformService : IAsyncDisposable
             try
             {
                 path = _policy.Authorize(path);
-                var duration = await ProbeDurationAsync(path, timeout.Token);
-                return await DecodeAsync(path, duration, timeout.Token);
+                await ProbeAudioAsync(path, timeout.Token);
+                return await DecodeAsync(path, timeout.Token);
             }
             catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
             {
@@ -103,11 +106,11 @@ public sealed class AudioWaveformService : IAsyncDisposable
         finally { _workers.Release(); }
     }
 
-    private async Task<double> ProbeDurationAsync(string path, CancellationToken cancellationToken)
+    private async Task ProbeAudioAsync(string path, CancellationToken cancellationToken)
     {
         var start = CreateStartInfo(_ffprobe!);
         Add(start, "-v", "error", "-protocol_whitelist", "file,pipe", "-format_whitelist", InputFormats,
-            "-select_streams", "a:0", "-show_entries", "stream=duration:format=duration", "-of", "json", path);
+            "-select_streams", "a:0", "-show_entries", "stream=index", "-of", "json", path);
         using var process = Start(start);
         try
         {
@@ -121,9 +124,6 @@ public sealed class AudioWaveformService : IAsyncDisposable
             var root = document.RootElement;
             if (!root.TryGetProperty("streams", out var streams) || streams.GetArrayLength() == 0)
                 throw new InvalidDataException("Diese Datei enthält keine abspielbare Audiospur.");
-            if (root.TryGetProperty("format", out var format) && TryDuration(format, out var duration)) return duration;
-            if (TryDuration(streams[0], out duration)) return duration;
-            throw new InvalidDataException("Die Länge dieser Audiodatei konnte nicht ermittelt werden.");
         }
         catch
         {
@@ -132,7 +132,7 @@ public sealed class AudioWaveformService : IAsyncDisposable
         }
     }
 
-    private async Task<AudioWaveformDto> DecodeAsync(string path, double duration, CancellationToken cancellationToken)
+    private async Task<AudioWaveformDto> DecodeAsync(string path, CancellationToken cancellationToken)
     {
         var start = CreateStartInfo(_ffmpeg!);
         Add(start, "-v", "error", "-nostdin", "-threads", "1", "-filter_threads", "1",
@@ -143,9 +143,9 @@ public sealed class AudioWaveformService : IAsyncDisposable
         var stderr = DrainErrorsAsync(process.StandardError, cancellationToken);
         try
         {
-            var energies = new double[PeakCount];
-            var counts = new long[PeakCount];
-            var binsPerSample = PeakCount / (duration * SampleRate);
+            // Keep energy buckets bounded even for long files with absent or inaccurate duration tags.
+            var buckets = new double[PeakCount * 4];
+            long samplesPerBucket = 1;
             var buffer = new byte[32 * 1024];
             long sampleIndex = 0;
             var carry = 0;
@@ -157,9 +157,15 @@ public sealed class AudioWaveformService : IAsyncDisposable
                 for (var offset = 0; offset < complete; offset += sizeof(float))
                 {
                     var sample = BinaryPrimitives.ReadSingleLittleEndian(buffer.AsSpan(offset, sizeof(float)));
-                    var bin = (int)Math.Min(PeakCount - 1, sampleIndex * binsPerSample);
-                    if (float.IsFinite(sample)) energies[bin] += (double)sample * sample;
-                    counts[bin]++;
+                    if (sampleIndex / samplesPerBucket == buckets.Length)
+                    {
+                        var half = buckets.Length / 2;
+                        for (var index = 0; index < half; index++)
+                            buckets[index] = buckets[index * 2] + buckets[index * 2 + 1];
+                        Array.Clear(buckets, half, half);
+                        samplesPerBucket *= 2;
+                    }
+                    if (float.IsFinite(sample)) buckets[(int)(sampleIndex / samplesPerBucket)] += (double)sample * sample;
                     sampleIndex++;
                 }
                 carry = available - complete;
@@ -169,29 +175,30 @@ public sealed class AudioWaveformService : IAsyncDisposable
             _ = await stderr;
             if (process.ExitCode != 0 || sampleIndex == 0) throw DecodeFailure();
             var peaks = new double[PeakCount];
+            var counts = new long[PeakCount];
+            for (var index = 0; index * samplesPerBucket < sampleIndex; index++)
+            {
+                var first = index * samplesPerBucket;
+                var length = Math.Min(samplesPerBucket, sampleIndex - first);
+                var bin = (int)((first + length / 2) * PeakCount / sampleIndex);
+                peaks[bin] += buckets[index];
+                counts[bin] += length;
+            }
             double maximum = 0;
             for (var index = 0; index < PeakCount; index++)
             {
-                peaks[index] = counts[index] == 0 ? 0 : Math.Sqrt(energies[index] / counts[index]);
+                peaks[index] = counts[index] == 0 ? 0 : Math.Sqrt(peaks[index] / counts[index]);
                 maximum = Math.Max(maximum, peaks[index]);
             }
             if (maximum > 0)
                 for (var index = 0; index < PeakCount; index++) peaks[index] = Math.Clamp(peaks[index] / maximum, 0, 1);
-            return new AudioWaveformDto(peaks, duration);
+            return new AudioWaveformDto(peaks, (double)sampleIndex / SampleRate);
         }
         catch
         {
             await KillAsync(process);
             throw;
         }
-    }
-
-    private static bool TryDuration(JsonElement element, out double duration)
-    {
-        duration = 0;
-        return element.TryGetProperty("duration", out var value) &&
-            double.TryParse(value.ToString(), NumberStyles.Float, CultureInfo.InvariantCulture, out duration) &&
-            double.IsFinite(duration) && duration > 0;
     }
 
     private static InvalidDataException DecodeFailure() => new("Für diese Datei konnte keine Audio-Wellenform berechnet werden.");

@@ -18,13 +18,15 @@ public sealed class CleanService
     private static readonly TimeSpan ScanLifetime = TimeSpan.FromMinutes(20);
     private readonly PathAccessPolicy _policy;
     private readonly IReadOnlyList<CleanLocation> _locations;
+    private readonly IRecycleBinService? _recycleBin;
     private readonly object _gate = new();
     private readonly Dictionary<string, (string Owner, CleanScanDto Scan)> _scans = new();
 
-    public CleanService(PathAccessPolicy policy, IReadOnlyList<CleanLocation>? locations = null)
+    public CleanService(PathAccessPolicy policy, IReadOnlyList<CleanLocation>? locations = null, IRecycleBinService? recycleBin = null)
     {
         _policy = policy;
         _locations = locations ?? DefaultLocations();
+        _recycleBin = recycleBin;
     }
 
     public async Task<CleanScanDto> ScanAsync(string owner, CancellationToken cancellationToken)
@@ -105,7 +107,7 @@ public sealed class CleanService
                         if (location.Mode == "hf" && !path.EndsWith(".incomplete", StringComparison.OrdinalIgnoreCase)) continue;
                         if (location.Mode == "downloads" && !new[] { ".crdownload", ".part", ".partial" }.Contains(Path.GetExtension(path), StringComparer.OrdinalIgnoreCase)) continue;
                         if (location.Mode == "pycache" && (!Path.GetDirectoryName(path)!.EndsWith("__pycache__", StringComparison.OrdinalIgnoreCase) || !path.EndsWith(".pyc", StringComparison.OrdinalIgnoreCase))) continue;
-                        if (location.Mode == "temp" && Path.GetRelativePath(location.Root, path).Contains("codex", StringComparison.OrdinalIgnoreCase)) continue;
+                        if (Path.GetFileName(path).StartsWith(".wme-", StringComparison.OrdinalIgnoreCase)) continue;
                         var info = new FileInfo(path);
                         if (info.LastWriteTimeUtc > DateTime.UtcNow - MinimumAge || !_policy.IsAllowed(path, write: true)) continue;
                         items.Add(new CleanItem(Guid.NewGuid().ToString("N"), location.Id, info.FullName, info.Length, info.LastWriteTimeUtc));
@@ -117,7 +119,10 @@ public sealed class CleanService
         }
     }
 
-    public CleanDeleteResult Delete(string owner, CleanDeleteRequest request)
+    internal CleanDeleteResult Delete(string owner, CleanDeleteRequest request) =>
+        DeleteAsync(owner, request, CancellationToken.None).GetAwaiter().GetResult();
+
+    public async Task<CleanDeleteResult> DeleteAsync(string owner, CleanDeleteRequest request, CancellationToken token)
     {
         if (request.ItemIds is null || request.ItemIds.Count == 0 || request.ItemIds.Count > 9000) throw new ArgumentException("Bitte bis zu 9000 Dateien auswählen.");
         CleanScanDto scan;
@@ -135,18 +140,29 @@ public sealed class CleanService
         var deleted = 0; var skipped = 0; long freed = 0;
         foreach (var id in ids)
         {
+            token.ThrowIfCancellationRequested();
             var candidate = allowed[id];
             var location = _locations.First(x => x.Id == candidate.Category);
             try
             {
                 var path = _policy.Authorize(candidate.Path, write: true);
+                if (Path.GetFileName(path).StartsWith(".wme-", StringComparison.OrdinalIgnoreCase)) { skipped++; continue; }
                 if (!string.Equals(path, candidate.Path, StringComparison.OrdinalIgnoreCase) || !IsWithin(location.Root, path) || HasReparseParent(location.Root, path)) { skipped++; continue; }
                 var info = new FileInfo(path);
                 if (!info.Exists || (info.Attributes & (FileAttributes.Directory | FileAttributes.ReparsePoint)) != 0 || info.Length != candidate.Bytes || info.LastWriteTimeUtc != candidate.LastWriteUtc || info.LastWriteTimeUtc > DateTime.UtcNow - MinimumAge) { skipped++; continue; }
                 using (var stream = new FileStream(path, FileMode.Open, FileAccess.ReadWrite, FileShare.None))
                     if (stream.Length != candidate.Bytes) { skipped++; continue; }
-                File.Delete(path);
-                deleted++; freed += candidate.Bytes;
+                if (location.Mode is "downloads" or "temp")
+                {
+                    if (_recycleBin is null) { skipped++; continue; }
+                    await _recycleBin.DeleteAsync(path, token);
+                }
+                else
+                {
+                    File.Delete(path);
+                    freed += candidate.Bytes;
+                }
+                deleted++;
             }
             catch (Exception e) when (e is IOException or UnauthorizedAccessException or System.Security.SecurityException or ArgumentException) { skipped++; }
         }
@@ -172,16 +188,23 @@ public sealed class CleanService
     {
         var user = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
         var local = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
-        return new[] {
+        var locations = new List<CleanLocation> {
             new CleanLocation("temp", "Temporäre Dateien", "Ältere temporäre Dateien; laufende Programme können sie noch benötigen.", Path.GetTempPath(), "temp"),
             new CleanLocation("pip", "Python pip Cache", "Heruntergeladene Python-Pakete; pip lädt sie bei Bedarf erneut.", Path.Combine(local, "pip", "Cache"), "cache"),
             new CleanLocation("pip-user", "Python pip Cache (Benutzer)", "Zusätzlicher pip-Downloadcache im Benutzerprofil.", Path.Combine(user, ".cache", "pip"), "cache"),
             new CleanLocation("npm", "npm Cache", "Zwischengespeicherte npm-Pakete; werden bei Bedarf erneut geladen.", Path.Combine(local, "npm-cache"), "cache"),
             new CleanLocation("uv", "Python uv Cache", "Zwischengespeicherte Python-Pakete von uv.", Path.Combine(local, "uv", "cache"), "cache"),
-            new CleanLocation("pycache", "Python Bytecode", "Generierte .pyc-Dateien in __pycache__; Python erstellt sie erneut.", Path.Combine(user, "Desktop", "python.toolz", "apps"), "pycache"),
-            new CleanLocation("hf-user", "Hugging Face Downloads", "Unvollständige Downloads über 48 Stunden; ein pausierter Download müsste neu beginnen.", Path.Combine(user, ".cache", "huggingface", "hub"), "hf"),
-            new CleanLocation("hf-d", "Hugging Face Downloads (D:)", "Unvollständige Downloads im Modell-Hub; fertige Modelle bleiben erhalten.", @"D:\LLM\hub", "hf"),
             new CleanLocation("downloads", "Unvollständige Downloads", "Alte .part- und .crdownload-Dateien; prüfe, ob ein Download fortgesetzt werden soll.", Path.Combine(user, "Downloads"), "downloads"),
         };
+        var hfHome = Environment.GetEnvironmentVariable("HF_HOME");
+        var hfHub = Environment.GetEnvironmentVariable("HF_HUB_CACHE");
+        if (string.IsNullOrWhiteSpace(hfHub))
+            hfHub = Path.Combine(string.IsNullOrWhiteSpace(hfHome) ? Path.Combine(user, ".cache", "huggingface") : hfHome, "hub");
+        if (Path.IsPathFullyQualified(hfHub))
+            locations.Add(new("hf-user", "Hugging Face Downloads", "Unvollständige Downloads über 48 Stunden; fertige Modelle bleiben erhalten.", hfHub, "hf"));
+        var workspace = Environment.GetEnvironmentVariable("WINDOWS_MOBILE_EXPLORER_PYTHON_WORKSPACE");
+        if (workspace is not null && Path.IsPathFullyQualified(workspace))
+            locations.Add(new("pycache", "Python Bytecode", "Generierte .pyc-Dateien in __pycache__; Python erstellt sie erneut.", workspace, "pycache"));
+        return locations;
     }
 }

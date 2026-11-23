@@ -26,7 +26,7 @@ $status = Label 'Tailscale wird geprüft …' 24 166 470 27
 $check = Button 'Erneut prüfen' 500 158 135
 $loginLabel = Label 'Tailscale-Anmeldename:' 24 201 205
 $login = [Windows.Forms.TextBox]@{ Location = '230,198'; Size = '405,27' }; $form.Controls.Add($login)
-$allDrives = [Windows.Forms.CheckBox]@{ Text = 'Alle Laufwerke freigeben (später in der App änderbar)'; Location = '24,235'; Size = '610,28'; Checked = $true }; $form.Controls.Add($allDrives)
+$allDrives = [Windows.Forms.CheckBox]@{ Text = 'Alle Laufwerke freigeben (sonst nur dein Benutzerordner)'; Location = '24,235'; Size = '610,28'; Checked = $false }; $form.Controls.Add($allDrives)
 $autostart = [Windows.Forms.CheckBox]@{ Text = 'Mit Windows automatisch starten'; Location = '24,269'; Size = '610,28'; Checked = $true }; $form.Controls.Add($autostart)
 $watchdog = [Windows.Forms.CheckBox]@{ Text = 'Bei einem Absturz automatisch neu starten'; Location = '24,303'; Size = '610,28'; Checked = $true }; $form.Controls.Add($watchdog)
 $savedSettingsPath = Join-Path $env:LOCALAPPDATA 'WindowsMobileExplorer\settings.json'
