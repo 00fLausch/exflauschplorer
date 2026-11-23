@@ -55,6 +55,23 @@ public sealed class CleanServiceTests : IDisposable
     }
 
     [Fact]
+    public async Task ReadOnlyShareIsReportedAsNotAvailable()
+    {
+        var cache = Path.Combine(_root, "cache");
+        Directory.CreateDirectory(cache);
+        var stale = Path.Combine(cache, "old.cache");
+        await File.WriteAllBytesAsync(stale, new byte[128]);
+        File.SetLastWriteTimeUtc(stale, DateTime.UtcNow.AddDays(-3));
+        var service = new CleanService(new PathAccessPolicy([new ShareRoot(_root, ReadOnly: true)]),
+            [new CleanLocation("test", "Test", "Test", cache, "cache")]);
+
+        var scan = await service.ScanAsync("owner", CancellationToken.None);
+
+        Assert.False(Assert.Single(scan.Categories).Exists);
+        Assert.Empty(scan.Categories.Single().Items);
+    }
+
+    [Fact]
     public async Task PreviewDoesNotFollowDirectoryLinks()
     {
         var scanRoot = Path.Combine(_root, "cache");

@@ -86,6 +86,27 @@ public sealed class SevenZipArchiveService
         }
     }
 
+    public async Task ExtractAllAsync(string archivePath, string outputDirectory, CancellationToken cancellationToken)
+    {
+        Directory.CreateDirectory(outputDirectory);
+        var start = CreateStartInfo("x");
+        start.ArgumentList.Add("-y");
+        start.ArgumentList.Add("-snld");
+        start.ArgumentList.Add("-spd");
+        start.ArgumentList.Add($"-o{outputDirectory}");
+        start.ArgumentList.Add("--");
+        start.ArgumentList.Add(archivePath);
+
+        await RunAsync(start, ExtractionTimeout,
+            async (process, token) =>
+            {
+                await process.StandardOutput.BaseStream.CopyToAsync(Stream.Null, token);
+                return true;
+            },
+            "Das 7-Zip-Archiv konnte nicht vollständig entpackt werden. Es ist möglicherweise beschädigt oder kennwortgeschützt.",
+            cancellationToken);
+    }
+
     private static async Task<long> CopyEntryAsync(Stream input, Stream output, long? expectedSize,
         Action<long> onBytesRead, CancellationToken token)
     {

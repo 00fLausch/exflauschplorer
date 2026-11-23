@@ -19,9 +19,13 @@ public static class ExplorerWebApp
     private static readonly SemaphoreSlim ArchiveDownloads = new(2, 2);
 
     public static WebApplication Build(ExplorerSettings settings, string[]? args = null)
-        => Build(settings, isolatedTest: false, args);
+        => Build(settings, isolatedTest: false, args, new TailscaleConnectionTrust());
 
     internal static WebApplication Build(ExplorerSettings settings, bool isolatedTest, string[]? args = null)
+        => Build(settings, isolatedTest, args, new TailscaleConnectionTrust());
+
+    internal static WebApplication Build(ExplorerSettings settings, bool isolatedTest, string[]? args,
+        ITailscaleConnectionTrust tailscaleConnection)
     {
         var builder = WebApplication.CreateBuilder(new WebApplicationOptions
         {
@@ -48,7 +52,6 @@ public static class ExplorerWebApp
         var windowsRecent = new WindowsRecentFileService(shortcuts,
             Environment.GetEnvironmentVariable("WINDOWS_MOBILE_EXPLORER_RECENT_DIR"));
         var quickAccess = new WindowsQuickAccessService(policy, new WindowsShellQuickAccessFolderSource());
-        var thumbnails = new ShellThumbnailService(policy);
         var properties = new FilePropertiesService(policy);
         var everythingSearch = new EverythingCliSearchProvider();
         var search = new RecursiveSearchService(policy, everythingSearch);
@@ -67,7 +70,7 @@ public static class ExplorerWebApp
         builder.Services.AddSingleton(shortcuts);
         builder.Services.AddSingleton(windowsRecent);
         builder.Services.AddSingleton(quickAccess);
-        builder.Services.AddSingleton(thumbnails);
+        builder.Services.AddSingleton<ShellThumbnailService>();
         builder.Services.AddSingleton(properties);
         builder.Services.AddSingleton<IEverythingSearchProvider>(everythingSearch);
         builder.Services.AddSingleton(search);
@@ -81,7 +84,6 @@ public static class ExplorerWebApp
         builder.Services.AddSingleton<ExplorerJobService>();
         builder.Services.AddHostedService(provider => provider.GetRequiredService<ExplorerJobService>());
         var trust = new ExplorerRequestTrust(settings, isolatedTest);
-        var tailscaleConnection = new TailscaleConnectionTrust();
         builder.Services.AddSingleton(trust);
         var app = builder.Build();
 
@@ -103,11 +105,22 @@ public static class ExplorerWebApp
 
         app.Use(async (context, next) =>
         {
-            if (!trust.AllowsHost(context.Request.Host) || !isolatedTest && !tailscaleConnection.IsTrusted(context))
+            if (!trust.AllowsHost(context.Request.Host))
             {
                 context.Response.StatusCode = StatusCodes.Status403Forbidden;
                 context.Response.Headers.CacheControl = "no-store";
-                await context.Response.WriteAsJsonAsync(new ApiErrorDto("Dieser Hostname ist für den Datei-Explorer nicht freigegeben.", "host_not_allowed"));
+                await context.Response.WriteAsJsonAsync(new ApiErrorDto(
+                    "Dieser Hostname oder Port ist für den Datei-Explorer nicht freigegeben. Prüfe die Tailscale-Adresse und führe die Einrichtung bei Bedarf erneut aus.",
+                    "host_not_allowed"));
+                return;
+            }
+            if (!isolatedTest && !tailscaleConnection.IsTrusted(context))
+            {
+                context.Response.StatusCode = StatusCodes.Status403Forbidden;
+                context.Response.Headers.CacheControl = "no-store";
+                await context.Response.WriteAsJsonAsync(new ApiErrorDto(
+                    "Die Tailscale-Verbindung konnte nicht verifiziert werden. Stelle sicher, dass Tailscale auf dem PC läuft, und führe die Einrichtung erneut aus.",
+                    "tailscale_peer_untrusted"));
                 return;
             }
 

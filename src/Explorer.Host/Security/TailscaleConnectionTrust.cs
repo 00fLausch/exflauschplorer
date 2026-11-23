@@ -8,7 +8,7 @@ using Microsoft.Win32.SafeHandles;
 namespace Explorer.Host.Security;
 
 /// <summary>Checks who owns the client end of an accepted IPv4 loopback connection.</summary>
-public sealed class TailscaleConnectionTrust
+public sealed class TailscaleConnectionTrust : ITailscaleConnectionTrust
 {
     private const int MaximumTableBytes = 16 * 1024 * 1024;
     private const int ErrorInsufficientBuffer = 122;

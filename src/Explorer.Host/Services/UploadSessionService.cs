@@ -194,7 +194,6 @@ public sealed class UploadSessionService
             }
             var target = policy.AuthorizeEntryMutation(session.TargetPath);
             var mode = conflictMode?.Trim().ToLowerInvariant();
-            string? backupPath = null;
             if (File.Exists(target) || Directory.Exists(target))
             {
                 if (mode is not ("replace" or "skip" or "keep-both")) throw new UploadConflictException(Path.GetFileName(target));
@@ -209,18 +208,12 @@ public sealed class UploadSessionService
                     throw new UploadConflictException(Path.GetFileName(target));
                 else
                 {
-                    backupPath = Path.Combine(session.Destination, $".wme-upload-backup-{Guid.NewGuid():N}.bak");
-                    File.Replace(session.StagePath, target, backupPath);
+                    await recycleBin.DeleteAsync(target, cancellationToken);
+                    logger.LogInformation("Bestehende Datei {Path} vor Upload-Ersetzung {UploadId} in den Papierkorb verschoben", target, id);
                 }
             }
 
-            if (backupPath is null) File.Move(session.StagePath, target);
-            else
-            {
-                try { await recycleBin.DeleteAsync(backupPath, CancellationToken.None); }
-                catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
-                { logger.LogWarning(ex, "Die ursprüngliche Datei bleibt nach Upload {UploadId} als Sicherung erhalten", id); }
-            }
+            File.Move(session.StagePath, target);
             File.SetAttributes(target, File.GetAttributes(target) & ~FileAttributes.Hidden);
             var result = new UploadCommitDto(true, false, target, digest);
             _sessions.TryRemove(session.Id, out _);

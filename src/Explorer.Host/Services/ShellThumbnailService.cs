@@ -5,15 +5,25 @@ using System.Security.Cryptography;
 using System.Text;
 using Explorer.Core.Security;
 using Explorer.Host.Configuration;
+using Microsoft.Extensions.Logging;
 
 namespace Explorer.Host.Services;
 
-public sealed class ShellThumbnailService(PathAccessPolicy policy)
+public sealed class ShellThumbnailService
 {
     private static readonly Guid ImageFactoryId = new("BCC18B79-BA16-442F-80C4-8A59C30C463B");
+    private readonly PathAccessPolicy policy;
+    private readonly ILogger<ShellThumbnailService> _logger;
     private readonly SemaphoreSlim _generationSlots = new(2, 2);
     private readonly object _cacheTrim = new();
+    private int _blockedSlotLogged;
     private static string CacheDirectory => Path.Combine(SettingsStore.DataDirectory, "thumbnails");
+
+    public ShellThumbnailService(PathAccessPolicy policy, ILogger<ShellThumbnailService> logger)
+    {
+        this.policy = policy;
+        _logger = logger;
+    }
 
     public async Task<string> GetThumbnailPathAsync(string path, int size, CancellationToken cancellationToken)
     {
@@ -31,7 +41,16 @@ public sealed class ShellThumbnailService(PathAccessPolicy policy)
             throw new TimeoutException("Die Windows-Vorschaubilddienste antworten nicht rechtzeitig.");
         // A blocked Shell handler cannot be interrupted safely. Keep its worker slot reserved.
         var generation = GenerateAsync(authorized, size, destination);
-        return await generation.WaitAsync(TimeSpan.FromSeconds(15), cancellationToken);
+        try
+        {
+            return await generation.WaitAsync(TimeSpan.FromSeconds(15), cancellationToken);
+        }
+        catch (TimeoutException)
+        {
+            if (Interlocked.Exchange(ref _blockedSlotLogged, 1) == 0)
+                _logger.LogError("Ein Windows-Vorschaubild-Handler blockiert einen Slot dauerhaft (Pfad: {ThumbnailPath}, Größe: {ThumbnailSize}).", authorized, size);
+            throw;
+        }
     }
 
     private async Task<string> GenerateAsync(string path, int size, string destination)

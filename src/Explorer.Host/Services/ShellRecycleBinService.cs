@@ -16,6 +16,12 @@ public sealed class ShellRecycleBinService : IRecycleBinService
     private static readonly Guid FileOperationClassId = new("3AD05575-8857-4850-9277-11B85BDB8E09");
     private static readonly Guid ShellItemInterfaceId = new("43826D1E-E718-42EE-BC55-A1E261C37BFE");
 
+    internal sealed record RecycleEntryInfo(string OriginalPath, string Name, string ShellPath,
+        long? Size, DateTimeOffset? DeletedAt, bool IsDirectory)
+    {
+        public string Id => MakeRecycleId(Path.GetDirectoryName(OriginalPath) ?? "", Name, ShellPath, Size, DeletedAt, IsDirectory);
+    }
+
     public Task DeleteAsync(string path, CancellationToken cancellationToken)
     {
         ValidateRecyclePath(path);
@@ -85,14 +91,9 @@ public sealed class ShellRecycleBinService : IRecycleBinService
             {
                 try
                 {
-                    var original = Convert.ToString(item.ExtendedProperty("System.Recycle.DeletedFrom")) ?? "";
-                    if (string.IsNullOrWhiteSpace(original)) continue;
-                    var name = Convert.ToString(item.Name) ?? Path.GetFileName(original);
-                    var size = TryLong(() => item.Size);
-                    var deleted = TryDate(() => item.ExtendedProperty("System.Recycle.DateDeleted"));
-                    var isDirectory = TryBool(() => item.IsFolder);
-                    var key = MakeRecycleId(item);
-                    result.Add(new RecycleBinEntryDto(key, name, Path.Combine(original, name), size, deleted, isDirectory));
+                    var info = ReadRecycleEntryInfo(item);
+                    if (info is null) continue;
+                    result.Add(new RecycleBinEntryDto(info.Id, info.Name, info.OriginalPath, info.Size, info.DeletedAt, info.IsDirectory));
                 }
                 catch (COMException) { }
             }
@@ -120,7 +121,7 @@ public sealed class ShellRecycleBinService : IRecycleBinService
             {
                 try
                 {
-                    if (MakeRecycleId(item) != id) continue;
+                    if (ReadRecycleEntryInfo(item)?.Id != id) continue;
                     item.InvokeVerb("undelete");
                     return true;
                 }
@@ -154,11 +155,9 @@ public sealed class ShellRecycleBinService : IRecycleBinService
             {
                 try
                 {
-                    var deletedFrom = Convert.ToString(item.ExtendedProperty("System.Recycle.DeletedFrom")) ?? "";
-                    var name = Convert.ToString(item.Name) ?? "";
-                    if (!ShellPathsEqual(deletedFrom, originalDirectory) ||
-                        !string.Equals(name, originalName, StringComparison.OrdinalIgnoreCase)) continue;
-                    var deletedAt = TryDate(() => item.ExtendedProperty("System.Recycle.DateDeleted"));
+                    var info = ReadRecycleEntryInfo(item);
+                    if (info is null || !ShellPathsEqual(info.OriginalPath, fullPath)) continue;
+                    var deletedAt = info!.DeletedAt;
                     if (match is null || deletedAt.GetValueOrDefault() > matchDeletedAt.GetValueOrDefault())
                     {
                         match = item;
@@ -188,11 +187,12 @@ public sealed class ShellRecycleBinService : IRecycleBinService
             {
                 try
                 {
-                    if (MakeRecycleId(item) != id) continue;
+                    if (ReadRecycleEntryInfo(item)?.Id != id) continue;
                     var itemPath = Convert.ToString(item.Path);
                     if (string.IsNullOrWhiteSpace(itemPath))
                         throw new IOException("Windows hat den Papierkorbeintrag nicht eindeutig identifiziert.");
                     Delete(itemPath, recycle: false);
+                    DeleteRecycleBinMetadata(itemPath);
                     return true;
                 }
                 catch (COMException) { }
@@ -202,12 +202,80 @@ public sealed class ShellRecycleBinService : IRecycleBinService
         finally { Release(items); Release(folder); Release(shell); }
     }
 
-    private static string MakeRecycleId(dynamic item)
+    private static void DeleteRecycleBinMetadata(string itemPath)
     {
-        var original = Convert.ToString(item.ExtendedProperty("System.Recycle.DeletedFrom")) ?? "";
-        var name = Convert.ToString(item.Name) ?? "";
+        var metadataPath = GetRecycleBinMetadataPath(itemPath);
+        if (metadataPath is null) return;
+        try
+        {
+            if (File.Exists(metadataPath)) File.Delete(metadataPath);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            // Best effort: the $R content has already been removed; a stale $I entry is preferable to failing the whole delete.
+        }
+    }
+
+    internal static string? GetRecycleBinMetadataPath(string itemPath)
+    {
+        var fileName = Path.GetFileName(itemPath);
+        if (fileName.Length < 3 || !fileName.StartsWith("$R", StringComparison.OrdinalIgnoreCase)) return null;
+        return Path.Combine(Path.GetDirectoryName(itemPath)!, "$I" + fileName[2..]);
+    }
+
+    internal static string? TryReadRecycleBinOriginalPath(string? itemPath)
+    {
+        if (string.IsNullOrWhiteSpace(itemPath)) return null;
+        var metadataPath = GetRecycleBinMetadataPath(itemPath);
+        if (metadataPath is null || !File.Exists(metadataPath)) return null;
+        try
+        {
+            var bytes = File.ReadAllBytes(metadataPath);
+            if (bytes.Length < 24) return null;
+            var version = BitConverter.ToInt64(bytes, 0);
+            string? path = version switch
+            {
+                1 when bytes.Length >= 544 => Encoding.Unicode.GetString(bytes, 24, 520).TrimEnd('\0'),
+                2 when bytes.Length >= 28 => ReadVersion2RecycleBinPath(bytes),
+                _ => null
+            };
+            if (string.IsNullOrWhiteSpace(path)) return null;
+            path = NormalizeShellPath(path);
+            return Path.IsPathFullyQualified(path) ? path : null;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException or DecoderFallbackException)
+        {
+            return null;
+        }
+    }
+
+    private static string? ReadVersion2RecycleBinPath(byte[] bytes)
+    {
+        var charCount = BitConverter.ToInt32(bytes, 24);
+        if (charCount <= 0 || charCount > bytes.Length / 2) return null;
+        var byteCount = charCount * 2;
+        if (bytes.Length - 28 < byteCount) return null;
+        return Encoding.Unicode.GetString(bytes, 28, byteCount).TrimEnd('\0');
+    }
+
+    internal static RecycleEntryInfo? ReadRecycleEntryInfo(dynamic item)
+    {
         var shellPath = Convert.ToString(item.Path) ?? "";
-        return MakeRecycleId(original, name, shellPath, TryLong(() => item.Size), TryDate(() => item.ExtendedProperty("System.Recycle.DateDeleted")), TryBool(() => item.IsFolder));
+        if (string.IsNullOrWhiteSpace(shellPath)) return null;
+        var deletedFrom = Convert.ToString(item.ExtendedProperty("System.Recycle.DeletedFrom")) ?? "";
+        var originalPath = TryReadRecycleBinOriginalPath(shellPath);
+        if (string.IsNullOrWhiteSpace(originalPath))
+        {
+            var displayName = Convert.ToString(item.Name) ?? "";
+            if (string.IsNullOrWhiteSpace(deletedFrom) || string.IsNullOrWhiteSpace(displayName)) return null;
+            originalPath = Path.Combine(deletedFrom, displayName);
+        }
+        var name = Path.GetFileName(originalPath);
+        if (string.IsNullOrWhiteSpace(name)) return null;
+        var size = TryLong(() => item.Size);
+        var deleted = TryDate(() => item.ExtendedProperty("System.Recycle.DateDeleted"));
+        var isDirectory = TryBool(() => item.IsFolder);
+        return new RecycleEntryInfo(originalPath, name, shellPath, size, deleted, isDirectory);
     }
 
     private static string MakeRecycleId(string original, string name, string shellPath, long? size, DateTimeOffset? deleted, bool isDirectory)

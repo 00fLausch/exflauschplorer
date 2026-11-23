@@ -117,11 +117,19 @@ public static class SettingsStore
                 Path.Combine(local, "Google", "Chrome", "User Data"),
                 Path.Combine(local, "Microsoft", "Edge", "User Data"),
                 Path.Combine(local, "BraveSoftware", "Brave-Browser", "User Data"),
-                Path.Combine(local, "Vivaldi", "User Data")]);
+                Path.Combine(local, "Vivaldi", "User Data"),
+                Path.Combine(local, "Microsoft", "WindowsApps")]);
         if (!string.IsNullOrEmpty(roaming))
             blocked.AddRange([Path.Combine(roaming, "Mozilla", "Firefox", "Profiles"),
                 Path.Combine(roaming, "Opera Software")]);
-        foreach (var folder in new[] { Environment.SpecialFolder.Startup, Environment.SpecialFolder.CommonStartup })
+        var documents = Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments, Environment.SpecialFolderOption.DoNotVerify);
+        if (!string.IsNullOrEmpty(documents))
+            blocked.AddRange([Path.Combine(documents, "WindowsPowerShell"), Path.Combine(documents, "PowerShell")]);
+        foreach (var folder in new[]
+                 {
+                     Environment.SpecialFolder.Startup, Environment.SpecialFolder.CommonStartup,
+                     Environment.SpecialFolder.StartMenu, Environment.SpecialFolder.CommonStartMenu
+                 })
         {
             var path = Environment.GetFolderPath(folder, Environment.SpecialFolderOption.DoNotVerify);
             if (!string.IsNullOrEmpty(path)) blocked.Add(path);

@@ -8,7 +8,9 @@ using System.Text;
 using System.Text.Json;
 using Explorer.Core.Security;
 using Explorer.Host.Configuration;
+using Explorer.Host.Security;
 using Microsoft.AspNetCore.Builder;
+using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.DependencyInjection;
 
 namespace Explorer.Host.Tests;
@@ -127,6 +129,79 @@ public sealed class HttpSecurityRegressionTests
         catch (IOException) { /* Kestrel may reset an aborted HTTP/1 connection instead of sending EOF. */ }
     }
 
+    [Fact]
+    public async Task ProductionModeAcceptsTheConfiguredTailscaleHost()
+    {
+        await using var server = await TestHost.StartAsync(false, new FakeTailscaleTrust(true));
+        using var request = ProductionRequest(HttpMethod.Get, "/api/v1/health", "https://test.ts.net");
+
+        using var response = await server.Client.SendAsync(request);
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+    }
+
+    [Theory]
+    [InlineData("falsch.ts.net", "test.ts.net")]
+    [InlineData("test.ts.net:8443", "test.ts.net:8443")]
+    public async Task ProductionModeRejectsWrongHostOrPort(string sentHost, string expectedHost)
+    {
+        await using var server = await TestHost.StartAsync(false, new FakeTailscaleTrust(true));
+        using var request = ProductionRequest(HttpMethod.Get, "/api/v1/health", "https://" + expectedHost);
+        request.Headers.Host = sentHost;
+
+        using var response = await server.Client.SendAsync(request);
+
+        Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
+        await AssertApiErrorAsync(response, "host_not_allowed", expectSetupHint: true);
+    }
+
+    [Fact]
+    public async Task ProductionModeRejectsUntrustedLoopbackConnections()
+    {
+        await using var server = await TestHost.StartAsync(false, new FakeTailscaleTrust(false));
+        using var request = ProductionRequest(HttpMethod.Get, "/api/v1/health", "https://test.ts.net");
+
+        using var response = await server.Client.SendAsync(request);
+
+        Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
+        await AssertApiErrorAsync(response, "tailscale_peer_untrusted", expectSetupHint: true);
+    }
+
+    [Fact]
+    public async Task ProductionModeRejectsWriteRequestsWithForeignOrigins()
+    {
+        await using var server = await TestHost.StartAsync(false, new FakeTailscaleTrust(true));
+        using var request = ProductionRequest(HttpMethod.Post, "/api/v1/recycle-bin/empty", "https://evil.example");
+
+        using var response = await server.Client.SendAsync(request);
+
+        Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
+        await AssertApiErrorAsync(response, "csrf_blocked");
+    }
+
+    private static HttpRequestMessage ProductionRequest(HttpMethod method, string path, string origin)
+    {
+        var request = new HttpRequestMessage(method, path);
+        request.Headers.Host = "test.ts.net";
+        request.Headers.Add("Tailscale-User-Login", "test@example.invalid");
+        request.Headers.Add("Origin", origin);
+        request.Headers.Add("X-Explorer-Request", "1");
+        return request;
+    }
+
+    private static async Task AssertApiErrorAsync(HttpResponseMessage response, string code, bool expectSetupHint = false)
+    {
+        using var document = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+        Assert.Equal(code, document.RootElement.GetProperty("code").GetString());
+        if (expectSetupHint)
+            Assert.Contains("Einrichtung", document.RootElement.GetProperty("message").GetString());
+    }
+
+    private sealed class FakeTailscaleTrust(bool trusted) : ITailscaleConnectionTrust
+    {
+        public bool IsTrusted(HttpContext context) => trusted;
+    }
+
     private static void AssertSandboxWithoutCache(HttpResponseMessage response)
     {
         Assert.Equal("sandbox; default-src 'none'", Assert.Single(response.Headers.GetValues("Content-Security-Policy")));
@@ -186,7 +261,7 @@ public sealed class HttpSecurityRegressionTests
             return "(none)";
         }
 
-        public static async Task<TestHost> StartAsync()
+        public static async Task<TestHost> StartAsync(bool isolatedTest = true, ITailscaleConnectionTrust? trust = null)
         {
             var root = Path.Combine(Path.GetTempPath(), $"WME-HTTP-Safety-{Guid.NewGuid():N}");
             var share = Directory.CreateDirectory(Path.Combine(root, "share")).FullName;
@@ -199,9 +274,14 @@ public sealed class HttpSecurityRegressionTests
                 {
                     Port = 0,
                     ShareAllDrives = false,
-                    Roots = [new ConfiguredRoot { Path = share }]
+                    Roots = [new ConfiguredRoot { Path = share }],
+                    TailscaleHostName = isolatedTest ? null : "test.ts.net",
+                    TailscaleHttpsPort = 443,
+                    AllowedLogins = isolatedTest ? [] : ["test@example.invalid"]
                 };
-                app = ExplorerWebApp.Build(settings, isolatedTest: true);
+                app = trust is null
+                    ? ExplorerWebApp.Build(settings, isolatedTest)
+                    : ExplorerWebApp.Build(settings, isolatedTest, args: null, trust);
                 await app.StartAsync();
                 var address = new Uri(Assert.Single(app.Urls));
                 settings.Port = address.Port;

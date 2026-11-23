@@ -80,6 +80,32 @@ public sealed class ExplorerSettingsServiceTests : IDisposable
     }
 
     [Fact]
+    public void BlocksScriptExecutionFoldersByDefault()
+    {
+        var policy = SettingsStore.CreatePolicy(new ExplorerSettings { ShareAllDrives = true });
+        var local = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+        var documents = Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments, Environment.SpecialFolderOption.DoNotVerify);
+
+        if (!string.IsNullOrEmpty(local))
+            Assert.Throws<UnauthorizedAccessException>(() => policy.Authorize(
+                Path.Combine(local, "Microsoft", "WindowsApps", "app.exe"), write: true));
+        if (!string.IsNullOrEmpty(documents))
+        {
+            Assert.Throws<UnauthorizedAccessException>(() => policy.Authorize(
+                Path.Combine(documents, "WindowsPowerShell", "profile.ps1"), write: true));
+            Assert.Throws<UnauthorizedAccessException>(() => policy.Authorize(
+                Path.Combine(documents, "PowerShell", "profile.ps1"), write: true));
+        }
+        foreach (var folder in new[] { Environment.SpecialFolder.StartMenu, Environment.SpecialFolder.CommonStartMenu })
+        {
+            var path = Environment.GetFolderPath(folder, Environment.SpecialFolderOption.DoNotVerify);
+            if (!string.IsNullOrEmpty(path))
+                Assert.Throws<UnauthorizedAccessException>(() => policy.Authorize(
+                    Path.Combine(path, "Programs", "autostart.bat"), write: true));
+        }
+    }
+
+    [Fact]
     public void ProtectsCriticalWindowsFoldersByDefaultAndHonorsTheSetting()
     {
         var windows = Environment.GetFolderPath(Environment.SpecialFolder.Windows);

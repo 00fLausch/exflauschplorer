@@ -961,7 +961,8 @@ public sealed class ExplorerJobService : BackgroundService
     {
         var entries = await _sevenZip.ListEntriesAsync(archivePath, cancellationToken);
         var stageRoot = Path.TrimEndingDirectorySeparator(Path.GetFullPath(staging));
-        ValidateExtractionSize(entries.Count, entries.Select(entry => entry.Size), ExtractionBudget(archivePath, staging));
+        var budget = ExtractionBudget(archivePath, staging);
+        ValidateExtractionSize(entries.Count, entries.Select(entry => entry.Size), budget);
         var destinations = new List<(SevenZipArchiveEntry Entry, string OutputPath)>();
         var seen = new Dictionary<string, bool>(StringComparer.OrdinalIgnoreCase);
 
@@ -995,28 +996,49 @@ public sealed class ExplorerJobService : BackgroundService
         }
 
         SetTotals(job, destinations.Count, destinations.Where(item => !item.Entry.IsDirectory).Sum(item => item.Entry.Size));
-        foreach (var (entry, outputPath) in destinations)
+        await WaitIfPausedAsync(job, cancellationToken);
+        await _sevenZip.ExtractAllAsync(archivePath, staging, cancellationToken);
+
+        // 7-Zip runs once for a solid archive; validate the resulting tree before it is moved into place.
+        var expectedPaths = new HashSet<string>(destinations.Select(item => item.OutputPath), StringComparer.OrdinalIgnoreCase);
+        foreach (var (_, outputPath) in destinations)
+        {
+            var parent = Path.GetDirectoryName(outputPath);
+            while (parent is { Length: > 0 } && parent.StartsWith(stageRoot, StringComparison.OrdinalIgnoreCase) &&
+                   !string.Equals(parent, stageRoot, StringComparison.OrdinalIgnoreCase))
+            {
+                expectedPaths.Add(parent);
+                parent = Path.GetDirectoryName(parent);
+            }
+        }
+
+        var actualPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        long actualBytes = 0;
+        var enumeration = new EnumerationOptions { RecurseSubdirectories = true, IgnoreInaccessible = false, AttributesToSkip = 0 };
+        foreach (var path in Directory.EnumerateFileSystemEntries(staging, "*", enumeration))
         {
             cancellationToken.ThrowIfCancellationRequested();
-            await WaitIfPausedAsync(job, cancellationToken);
-            if (entry.IsDirectory)
-            {
-                Directory.CreateDirectory(outputPath);
-            }
-            else
-            {
-                Directory.CreateDirectory(Path.GetDirectoryName(outputPath)!);
-                var extracted = await _sevenZip.ExtractEntryAsync(archivePath, entry.Path, outputPath, read =>
-                {
-                    job.CompletedBytes += read;
-                    PublishIfDue(job);
-                }, cancellationToken, expectedSize: entry.Size);
-                if (extracted != entry.Size)
-                    throw new InvalidDataException("Die Dateigröße im 7-Zip-Archiv stimmt nicht mit dem gelesenen Inhalt überein.");
-            }
-            job.CompletedItems++;
-            PublishIfDue(job);
+            var attributes = File.GetAttributes(path);
+            if ((attributes & FileAttributes.ReparsePoint) != 0)
+                throw new InvalidDataException("Das 7-Zip-Archiv enthält eine Verknüpfung. Verknüpfungen werden aus Sicherheitsgründen nicht entpackt.");
+            if (!expectedPaths.Contains(path))
+                throw new InvalidDataException("Das 7-Zip-Archiv enthält unerwartete Einträge.");
+            actualPaths.Add(path);
+            if ((attributes & FileAttributes.Directory) == 0) actualBytes += new FileInfo(path).Length;
         }
+        if (actualBytes > budget)
+            throw new InvalidDataException("Das Archiv überschreitet das Größenlimit, das Kompressionsverhältnis oder den verfügbaren Speicherplatz.");
+        foreach (var expected in expectedPaths)
+            if (!actualPaths.Contains(expected))
+                throw new InvalidDataException("Das 7-Zip-Archiv wurde nicht vollständig entpackt.");
+        foreach (var (entry, outputPath) in destinations.Where(item => !item.Entry.IsDirectory))
+        {
+            if (new FileInfo(outputPath).Length != entry.Size)
+                throw new InvalidDataException("Die Dateigröße im 7-Zip-Archiv stimmt nicht mit dem gelesenen Inhalt überein.");
+        }
+        job.CompletedBytes = actualBytes;
+        job.CompletedItems = destinations.Count;
+        PublishIfDue(job);
     }
 
     private static string ResolveArchiveEntryPath(string root, string name, bool directory)

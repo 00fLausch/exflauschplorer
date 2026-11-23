@@ -93,6 +93,30 @@ public sealed class SecurityReviewRegressionTests : IDisposable
         Assert.Equal("keep this", await File.ReadAllTextAsync(marker));
     }
 
+    [Fact]
+    public async Task UploadReplaceMovesOriginalToRecycleBinUnderItsRealName()
+    {
+        var target = Path.Combine(_share, "report.txt");
+        await File.WriteAllTextAsync(target, "original");
+        var replacement = "replacement"u8.ToArray();
+        var recycleBin = new IsolatedRecycleBinService(Path.Combine(_root, "upload-replace-bin"));
+        var uploads = new UploadSessionService(_policy, recycleBin, NullLogger<UploadSessionService>.Instance,
+            Path.Combine(_root, "upload-replace-metadata"));
+        var session = await uploads.CreateAsync(new UploadCreateRequest("report.txt", replacement.Length, _share),
+            Owner, CancellationToken.None);
+        await WriteChunkAsync(uploads, session.Id, 0, replacement);
+
+        var result = await uploads.CommitAsync(session.Id, Owner, "replace", CancellationToken.None);
+
+        Assert.True(result.Completed);
+        Assert.Equal("replacement", await File.ReadAllTextAsync(target));
+        var entries = await recycleBin.ListAsync(CancellationToken.None);
+        var recycled = Assert.Single(entries);
+        Assert.Equal("report.txt", recycled.Name);
+        Assert.Equal(target, recycled.OriginalPath);
+        Assert.True(_policy.IsAllowed(recycled.OriginalPath));
+    }
+
     [Theory]
     [InlineData("report?.txt")]
     [InlineData("report.txt.")]
@@ -191,6 +215,55 @@ public sealed class SecurityReviewRegressionTests : IDisposable
         Assert.Equal(edited, saved.Content);
         byte[] expectedBytes = [.. encoding.GetPreamble(), .. encoding.GetBytes(edited)];
         Assert.Equal(expectedBytes, await File.ReadAllBytesAsync(path));
+    }
+
+    [Fact]
+    public async Task MaintenanceRemovesAbandonedEditPartials()
+    {
+        var metadata = Path.Combine(_root, "edit-partials");
+        var editor = new TextDocumentService(_policy, _root);
+        var stale = Path.Combine(_share, ".wme-edit-stale.partial");
+        var fresh = Path.Combine(_share, ".wme-edit-fresh.partial");
+        var staleRegistry = Path.Combine(metadata, Path.GetFileName(stale) + ".json");
+        var freshRegistry = Path.Combine(metadata, Path.GetFileName(fresh) + ".json");
+        await File.WriteAllTextAsync(stale, "crash rest");
+        await File.WriteAllTextAsync(fresh, "active rest");
+        editor.TrackPartial(stale, staleRegistry);
+        editor.TrackPartial(fresh, freshRegistry);
+        File.SetLastWriteTimeUtc(staleRegistry, DateTime.UtcNow.AddDays(-8));
+        try
+        {
+            var removed = await editor.CleanupAbandonedPartialsAsync(TimeSpan.FromDays(7), CancellationToken.None);
+
+            Assert.Equal(1, removed);
+            Assert.False(File.Exists(stale));
+            Assert.False(File.Exists(staleRegistry));
+            Assert.True(File.Exists(fresh));
+            Assert.True(File.Exists(freshRegistry));
+        }
+        finally
+        {
+            if (File.Exists(fresh)) File.Delete(fresh);
+            if (File.Exists(freshRegistry)) File.Delete(freshRegistry);
+        }
+    }
+
+    [Theory]
+    [InlineData(".bat")]
+    [InlineData(".cmd")]
+    [InlineData(".ps1")]
+    public async Task NewEmptyWindowsScriptsUseCrlfLineEndings(string extension)
+    {
+        var path = Path.Combine(_share, "leeres-skript" + extension);
+        await File.WriteAllTextAsync(path, "");
+        var editor = new TextDocumentService(_policy);
+        var document = await editor.ReadAsync(path, CancellationToken.None);
+
+        await editor.SaveAsync(new TextSaveRequest(path, "echo hallo\necho tschuss\n", document.ETag), CancellationToken.None);
+
+        var saved = await File.ReadAllTextAsync(path);
+        Assert.DoesNotContain("\n", saved.Replace("\r\n", "", StringComparison.Ordinal), StringComparison.Ordinal);
+        Assert.Contains("\r\n", saved, StringComparison.Ordinal);
     }
 
     private UploadSessionService CreateUploads() => new(_policy, new IsolatedRecycleBinService(Path.Combine(_root, "bin")),

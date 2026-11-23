@@ -1,78 +1,117 @@
-<img src="src/Explorer.Web/public/pwa-192.png" width="96" alt="EXfLauschPLORER-Appsymbol">
-
 # EXfLauschPLORER
 
-**Dein Windows-PC. Deine Dateien. Auf dem Handy – auch unterwegs.**
+Your Windows PC, in your pocket. No cloud, no open ports, no extra passwords.
 
-EXfLauschPLORER verbindet einen Windows-PC über dein privates Tailscale-Netz mit deinem Smartphone. Öffne Laufwerke und Ordner, verwalte Dateien und streame Musik oder Videos direkt vom PC. Auf dem Handy läuft die Oberfläche als Web-App im Browser oder wie eine App vom Home-Bildschirm; der Windows-PC stellt die Dateien bereit.
+Your files already live on your PC. EXfLauschPLORER lets you reach them from your phone, wherever you are, without syncing or uploading them anywhere first.
 
-| System im Blick | Dateien unterwegs | Musik direkt vom PC |
+It's not a sync folder and not a remote desktop. It's a file explorer for the PC itself, rebuilt for a touch screen. Open a PDF on the train, stream a three-hour DJ set, grab a file for an email, or upload photos straight into the right folder. It runs in your phone's browser or from the home screen like a regular app; the files stay on your PC.
+
+The app and installer UI are currently German; menu labels in this README are translated for readability.
+
+| System at a glance | Files on the go | Music from your PC |
 |:---:|:---:|:---:|
-| ![Systemübersicht mit Laufwerken](docs/screenshots/01-system.png) | ![Dateiansicht mit DJ-Sets](docs/screenshots/02-dateien.png) | ![Player mit Wellenform](docs/screenshots/03-player.png) |
+| ![System overview with drives](docs/screenshots/01-system.png) | ![File view with DJ sets](docs/screenshots/02-dateien.png) | ![Player with waveform](docs/screenshots/03-player.png) |
 
-*Die Bilder zeigen die Originaloberfläche mit vollständig erfundenen Demo-Laufwerken, Ordnern und Titeln. Die Wellenform ist ebenfalls ein Demo-Datensatz.*
+The screenshots show the original UI with entirely fictional demo drives, folders, and titles. The waveform is a demo data set too.
 
-## Was du damit machen kannst
+## Feels like Explorer, and then some
 
-- **Deinen PC durchsuchen:** Laufwerke, Windows-Schnellzugriffe, wichtige Ordner und Favoriten direkt auf dem Handy öffnen; suchen, sortieren und zwischen Ansichten wechseln.
-- **Dateien verwalten:** Kopieren, verschieben, umbenennen, hoch- und herunterladen sowie Papierkorb und Eigenschaften nutzen. Die tatsächlich verfügbaren Aktionen hängen von den Windows-Rechten und deinen Freigaben ab.
-- **PDFs lesen:** Mehrseitige Dokumente direkt in der App öffnen, zwischen Seiten wechseln und vergrößern; passwortgeschützte PDFs lassen sich nach Eingabe des Passworts anzeigen.
-- **Musik und Videos streamen:** Medien bleiben auf dem PC. Der Player bietet Warteschlange, schwebende Miniansicht, Zeitleiste und Sprünge. Für Audiodateien kann eine Wellenform beim Spulen helfen.
-- **Platzfresser finden:** Der Clean-Modus zeigt unterstützte Cache- und temporäre Dateien zur Auswahl mit Informationen an. Gelöscht wird erst nach ausdrücklicher Auswahl und Bestätigung in der App.
-- **Privat verbinden:** Tailscale Serve stellt den Zugriff innerhalb des Tailnets bereit; der lokale App-Server lauscht nur auf dem PC. Eine Anmeldeliste und optionaler PIN ergänzen den Zugriffsschutz.
-- **Dranbleiben:** Autostart und ein Wächter für unerwartete Abstürze lassen sich bei der Einrichtung getrennt aktivieren.
+If you use Windows Explorer, you already know your way around. Quick Access, the address bar, back/forward/up, the recycle bin, properties, undo, and the familiar "Replace, Skip, or Keep both" dialog all work the way you'd expect, and the functions sit roughly where you'd look for them.
 
-## Schnellstart
+It also does a few things Explorer can't:
 
-### 1. Windows-PC einrichten
+- Folder sizes in the file list. Switch to the folder-size sort to calculate sizes for the folders in the current view; large or still-running scans can show an incomplete value.
+- File checksums in the properties dialog, no extra tools needed.
+- Waveform seeking for audio, so you can jump straight to the drop in a long mix.
+- Clean mode that lists caches and leftover temp files and only deletes what you pick.
 
-1. Lade den aktuellen **Windows-Installer** aus den [Releases](https://github.com/00fLausch/exflauschplorer/releases/latest) herunter und starte ihn als normaler Windows-Benutzer. Alternativ gibt es dort ein ZIP-Paket: vollständig entpacken und `ZIP-starten.cmd` öffnen.
-2. Der Einrichtungsdialog prüft, ob Tailscale installiert und verbunden ist. Falls nötig, führen die Links zur [Windows-Installation](https://tailscale.com/download/windows) und zur [Tailscale-Hilfe](https://tailscale.com/docs/install). Melde dich an und prüfe erneut.
-3. Wähle Freigaben, Autostart und Absturzwächter. Neue Installationen teilen standardmäßig den Benutzerordner. Vorhandene Freigaben bleiben bei unveränderter Auswahl erhalten. Weitere Änderungen nimmst du am Windows-PC über „Konfiguration öffnen“ im Infobereich vor.
-4. Starte die Einrichtung. Sie richtet den lokalen Dienst und Tailscale Serve ein und zeigt die persönliche HTTPS-Adresse an. Wenn Tailscale eine Freigabe für Serve verlangt, folge dem angezeigten Hinweis und starte die Einrichtung erneut. MagicDNS und HTTPS müssen im Tailnet verfügbar sein.
+## What it doesn't need
 
-Der Installer enthält die benötigte .NET-Laufzeit; Node.js und das .NET-SDK sind für die fertigen Pakete nicht nötig. Die App benötigt keine Administratorrechte und installiert sich für den aktuellen Windows-Benutzer. Tailscale selbst kann für seine Installation erhöhte Rechte benötigen.
+- No cloud. Files stay on your PC. Nothing goes to a third-party service, and there's no storage quota.
+- No open ports. The app server listens only on 127.0.0.1. It's reachable solely through your private Tailscale network, encrypted end to end with WireGuard.
+- No extra accounts. Your Tailscale identity is your login. Only accounts you allow get in, with an optional PIN on top.
+- No admin rights, no server to babysit. A regular Windows install; the setup wizard configures Tailscale Serve for you.
 
-### 2. iPhone oder iPad verbinden
+## About Tailscale
 
-1. Installiere [Tailscale für iOS](https://tailscale.com/download/ios), melde dich im selben Tailnet an und aktiviere die Verbindung. Für Android gibt es ebenfalls eine [Tailscale-App](https://tailscale.com/download/android).
-2. Öffne die vom Setup angezeigte HTTPS-Adresse auf dem Gerät in Safari. Die Adresse lässt sich auch über das App-Symbol im Windows-Infobereich kopieren.
-3. Optional: **Teilen → Zum Home-Bildschirm** auswählen. So öffnet sich EXfLauschPLORER wie eine eigene App.
+Tailscale connects your devices into a private network, as if your phone were sitting at home next to your PC, wherever you actually are. It's free for personal use (the Personal plan covers unlimited devices and up to six users), and you sign in with an existing Google, Microsoft, Apple or GitHub account.
 
-Der PC muss eingeschaltet und angemeldet sein, und beide Geräte müssen Tailscale erreichen. Die Bedienoberfläche läuft auf dem Mobilgerät; die Dateien und der Server bleiben auf dem PC.
+You set it up once and then forget about it. On the iPhone it quietly stays connected in the background, so when you open EXfLauschPLORER, your PC is simply there. No VPN to switch on, no router settings, no IP addresses to remember.
 
-## Gut zu wissen
+You'll need: a Windows PC that's switched on and signed in, and Tailscale on both the PC and your phone (iPhone or Android).
 
-- Die Wiedergabe hängt von den Audio- und Videoformaten ab, die der Browser auf deinem Gerät unterstützt. Eine Umwandlung während der Wiedergabe ist nicht eingebaut.
-- Für die Audio-Wellenform werden **FFmpeg und FFprobe auf dem PC** benötigt. Ohne sie bleibt die normale Zeitleiste bedienbar. Mehr dazu im [technischen Handbuch](docs/manual.md).
-- Die PDF-Vorschau verwendet [Mozilla PDF.js](https://mozilla.github.io/pdf.js/) und stellt jeweils eine Seite dar. Ausfüllbare Formulare und Textauswahl werden in dieser Vorschau nicht unterstützt; zum Bearbeiten die Datei in einer passenden PDF-App öffnen.
-- Der Wächter startet die App nach einem unerwarteten Prozessabbruch erneut und begrenzt wiederholte Neustarts. Ein reguläres **Beenden** über das Tray-Menü bleibt ein Beenden; bei aktivem Autostart startet die App bei der nächsten Windows-Anmeldung erneut. Eine hängende, aber weiterhin laufende App erkennt der Wächter nicht.
-- Freigaben gelten innerhalb der Windows-Rechte des angemeldeten Benutzers. Browserprofile, Autostart, SSH-Schlüssel und der Datenordner der App sind für den Dateizugriff gesperrt. In der Web-App kannst du deine Freigaben ansehen.
-- Beim Deinstallieren werden Programm und Autostart entfernt. Einstellungen und eine bestehende Tailscale-Serve-Route bleiben erhalten; eine solche Route kann bei Bedarf in Tailscale separat entfernt werden.
-- Der Quellcode und die Releases sind öffentlich verfügbar. Der Zugriff auf eine laufende App erfolgt über das eigene Tailscale-Netz.
+## What you can do
 
-## Aus dem Quellcode
+- Browse your PC: Open drives, Windows Quick Access, important folders, and favorites directly on your phone; search, sort, and switch between views.
+- Manage files: Copy, move, rename, upload and download, and use the recycle bin and properties. The actions actually available depend on Windows permissions and your shares.
+- Read PDFs: Open multi-page documents directly in the app, switch pages, and zoom; password-protected PDFs can be displayed after entering the password.
+- Stream music and video: Media stays on the PC. The player offers a queue, a floating mini view, a timeline, and seeks. For audio files, a waveform can help with seeking.
+- Find space hogs: Clean mode lists supported cache and temporary files for selection with details. Nothing is deleted until you explicitly select it and confirm in the app.
+- Stay available: Autostart and a watchdog for unexpected crashes can be enabled separately during setup.
 
-Voraussetzungen: Windows x64, Node.js 22.13 oder neuer und npm, .NET-10-SDK und Tailscale. Im Projektordner:
+## Quick start
+
+### 1. Set up the Windows PC
+
+1. Download the current Windows installer from the Releases and run it as a normal Windows user. A ZIP package is also available there: extract it completely and open ZIP-starten.cmd.
+2. The setup dialog checks whether Tailscale is installed and connected. If needed, the links lead to the Windows installation and the Tailscale help. Sign in and check again.
+3. Choose shares, autostart, and the crash watchdog. New installations share the user folder by default. Existing shares are preserved if the selection is unchanged. Make further changes on the Windows PC via "Open configuration" in the notification area.
+4. Start setup. It configures the local service and Tailscale Serve and shows your personal HTTPS address. If Tailscale asks for consent to use Serve, follow the displayed link and run setup again. MagicDNS and HTTPS must be available in the tailnet.
+
+The installer includes the required .NET runtime; Node.js and the .NET SDK are not needed for the finished packages. The app does not require administrator rights and installs for the current Windows user. Tailscale itself may require elevated rights for its installation.
+
+### 2. Connect your iPhone or iPad
+
+1. Install Tailscale for iOS, sign in to the same tailnet, and enable the connection. An Android app is also available. Leave Tailscale switched on: it runs in the background and reconnects by itself.
+2. Open the HTTPS address shown by setup on the device in Safari. You can also copy the address from the app icon in the Windows notification area.
+3. Optional: choose Share → Add to Home Screen. EXfLauschPLORER then opens like its own app.
+
+The PC must be turned on and signed in, and both devices must be able to reach Tailscale. The UI runs on the mobile device; the files and server remain on the PC.
+
+## Good to know
+
+- Playback depends on the audio and video formats your device's browser supports. Conversion during playback is not built in.
+- The audio waveform requires FFmpeg and FFprobe on the PC. Without them, the normal timeline remains usable. See the technical manual.
+- The PDF preview uses Mozilla PDF.js and displays one page at a time. Fillable forms and text selection are not supported in this preview; open the file in a suitable PDF app to edit it.
+- The watchdog restarts the app after an unexpected process exit and limits repeated restarts. A regular Quit from the tray menu remains a quit; with autostart active, the app starts again at the next Windows login. The watchdog does not detect an app that is hung but still running.
+- Shares apply within the Windows rights of the logged-in user. Browser profiles, autostart, SSH keys, and the app's data folder are blocked from file access. You can view your shares in the web app.
+- Uninstalling removes the program and autostart. Settings and an existing Tailscale Serve route remain; such a route can be removed separately in Tailscale if needed.
+- The source code and releases are publicly available. Access to a running app goes through your own Tailscale network.
+
+## Build from source
+
+Requirements: Windows x64, Node.js 22.13 or newer and npm, the .NET 10 SDK, and Tailscale. In the project folder:
 
 ```powershell
 .\setup.ps1
 ```
 
-Das Skript baut bei Bedarf das Frontend und den Windows-Host. Für das Erstellen von Installer und ZIP wird zusätzlich Inno Setup benötigt; siehe [Build-Anleitung](installer/BUILD.md). Entwicklungsdetails, Sicherheit, API und Tests stehen im [technischen Handbuch](docs/manual.md).
+The script builds the frontend and the Windows host if needed. Creating the installer and ZIP additionally requires Inno Setup; see the build guide. Development details, security, API, and tests are in the technical manual.
 
-## So funktioniert es
+## Project status
+
+The detailed status matrix, including limitations and open hardware/iOS checks, is in FEATURES.md. "Done" means implemented and covered by the corresponding automated test; hardware, iOS, and media benchmarks are marked separately as not verified. Version history is in CHANGELOG.md.
+
+## How it works
 
 ```text
-iPhone / Android Browser oder Home-Bildschirm-App
+iPhone / Android browser or home-screen app
                   │
             Tailscale HTTPS
                   │
-        Windows-PC: Tailscale Serve
+        Windows PC: Tailscale Serve
                   │
-        lokaler EXfLauschPLORER-Server
+        local EXfLauschPLORER server
                   │
-       freigegebene Windows-Dateien
+       shared Windows files
 ```
 
-Der Server wird in der angemeldeten Windows-Sitzung ausgeführt. Tailscale Serve vermittelt die Verbindung; die App prüft die Tailscale-Identität und ihre Freigaben. Der Server lauscht auf `127.0.0.1`, nicht direkt im lokalen Netzwerk.
+The server runs in the logged-in Windows session. Tailscale Serve brokers the connection; the app checks the Tailscale identity and its shares. The server listens on 127.0.0.1, not directly on the local network.
+
+## Contributing
+
+Bug reports and feature ideas are welcome. Read CONTRIBUTING.md and use the bug-report form. For security issues, see SECURITY.md — do not open a public issue.
+
+## License
+
+EXfLauschPLORER is licensed under the MIT License. Dependencies retain their own licenses.

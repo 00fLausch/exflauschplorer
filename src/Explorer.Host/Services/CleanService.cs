@@ -50,7 +50,7 @@ public sealed class CleanService
             token.ThrowIfCancellationRequested();
             var items = new List<CleanItem>();
             var truncated = false;
-            var exists = Directory.Exists(location.Root) && _policy.IsAllowed(location.Root);
+            var exists = Directory.Exists(location.Root) && _policy.IsAllowed(location.Root, write: true);
             var timer = Stopwatch.StartNew();
             if (exists)
             {
