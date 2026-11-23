@@ -55,7 +55,7 @@ public sealed class CleanServiceTests : IDisposable
     }
 
     [Fact]
-    public async Task ReadOnlyShareIsReportedAsNotAvailable()
+    public async Task ReadOnlyShareShowsScanButDisablesDeletion()
     {
         var cache = Path.Combine(_root, "cache");
         Directory.CreateDirectory(cache);
@@ -66,9 +66,36 @@ public sealed class CleanServiceTests : IDisposable
             [new CleanLocation("test", "Test", "Test", cache, "cache")]);
 
         var scan = await service.ScanAsync("owner", CancellationToken.None);
+        var category = Assert.Single(scan.Categories);
 
-        Assert.False(Assert.Single(scan.Categories).Exists);
-        Assert.Empty(scan.Categories.Single().Items);
+        Assert.True(category.Shared);
+        Assert.True(category.Exists);
+        Assert.True(category.ReadOnly);
+        Assert.Equal(stale, Assert.Single(category.Items).Path);
+        var result = service.Delete("owner", new(scan.Id, [category.Items[0].Id]));
+        Assert.Equal(0, result.Deleted);
+        Assert.Equal(1, result.Skipped);
+        Assert.True(File.Exists(stale));
+    }
+
+    [Fact]
+    public async Task UnsharedFolderIsReportedAsNotShared()
+    {
+        var cache = Path.Combine(_root, "cache");
+        Directory.CreateDirectory(cache);
+        var stale = Path.Combine(cache, "old.cache");
+        await File.WriteAllBytesAsync(stale, new byte[128]);
+        File.SetLastWriteTimeUtc(stale, DateTime.UtcNow.AddDays(-3));
+        var service = new CleanService(new PathAccessPolicy([]),
+            [new CleanLocation("test", "Test", "Test", cache, "cache")]);
+
+        var scan = await service.ScanAsync("owner", CancellationToken.None);
+        var category = Assert.Single(scan.Categories);
+
+        Assert.False(category.Shared);
+        Assert.False(category.Exists);
+        Assert.False(category.ReadOnly);
+        Assert.Empty(category.Items);
     }
 
     [Fact]

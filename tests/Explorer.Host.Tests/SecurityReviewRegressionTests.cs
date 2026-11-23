@@ -248,6 +248,35 @@ public sealed class SecurityReviewRegressionTests : IDisposable
         }
     }
 
+    [Fact]
+    public async Task StartupCleanupRemovesAbandonedSevenZipStagingDirectories()
+    {
+        var orphan = Path.Combine(_share, $".wme-{Guid.NewGuid():N}-{Guid.NewGuid():N}.partial");
+        Directory.CreateDirectory(orphan);
+        File.SetAttributes(orphan, FileAttributes.Hidden);
+        await File.WriteAllTextAsync(Path.Combine(orphan, "rest.txt"), "crash rest");
+        var decoy = Path.Combine(_share, ".wme-upload-decoy.partial");
+        Directory.CreateDirectory(decoy);
+        using var jobs = CreateJobs();
+        var active = await jobs.EnqueueAsync(new OperationRequest("unzip", ["quelle.7z"], _share, "aktiv"), CancellationToken.None);
+        var activeStaging = Path.Combine(_share, $".wme-{active.Id}-{Guid.NewGuid():N}.partial");
+        Directory.CreateDirectory(activeStaging);
+        try
+        {
+            var removed = jobs.CleanAbandonedStagingDirectories(CancellationToken.None);
+
+            Assert.Equal(1, removed);
+            Assert.False(Directory.Exists(orphan));
+            Assert.True(Directory.Exists(activeStaging));
+            Assert.True(Directory.Exists(decoy));
+        }
+        finally
+        {
+            if (Directory.Exists(activeStaging)) Directory.Delete(activeStaging, recursive: true);
+            if (Directory.Exists(decoy)) Directory.Delete(decoy, recursive: true);
+        }
+    }
+
     [Theory]
     [InlineData(".bat")]
     [InlineData(".cmd")]

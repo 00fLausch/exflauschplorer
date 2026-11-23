@@ -451,8 +451,8 @@ base('clean mode deletes only the chosen isolated test file', async ({ page }) =
   await expect(category.getByText('fresh-clean-test.tmp', { exact: true })).toHaveCount(0)
   await category.locator('.clean-item').filter({ hasText: 'selected-clean-test.tmp' }).getByRole('checkbox').check()
   await page.getByRole('button', { name: 'Auswahl löschen' }).click()
-  await page.getByRole('dialog', { name: 'Dateien endgültig löschen?' }).getByRole('button', { name: 'Endgültig löschen' }).click()
-  await expect(page.getByRole('status')).toContainText('1 Dateien gelöscht')
+  await page.getByRole('dialog', { name: 'Ausgewählte Dateien aufräumen?' }).getByRole('button', { name: 'Endgültig löschen' }).click()
+  await expect(page.locator('.clean-result')).toContainText('1 Dateien gelöscht')
   await expect.poll(async () => stat(selected).then(() => true, () => false)).toBe(false)
   expect((await stat(untouched)).size).toBe(1024)
   expect((await stat(fresh)).size).toBe(1024)
@@ -462,7 +462,7 @@ test('clean preview requires a specific selection and confirmation', async ({ pa
   const filePath = path.join(folders.apps, 'old-cache.tmp')
   let deleteCalls = 0
   let submitted: unknown = null
-  await page.route('**/api/v1/clean/scan', route => route.fulfill({ json: { id: 'scan-1', createdUtc: '2026-11-20T10:00:00Z', categories: [{ id: 'temp', title: 'Temporäre Dateien', description: 'Ältere temporäre Dateien', exists: true, truncated: false, items: [{ id: 'item-1', category: 'temp', path: filePath, bytes: 4096, lastWriteUtc: '2026-11-10T10:00:00Z' }] }] } }))
+  await page.route('**/api/v1/clean/scan', route => route.fulfill({ json: { id: 'scan-1', createdUtc: '2026-11-20T10:00:00Z', categories: [{ id: 'temp', title: 'Temporäre Dateien', description: 'Ältere temporäre Dateien', shared: true, exists: true, readOnly: false, truncated: false, items: [{ id: 'item-1', category: 'temp', path: filePath, bytes: 4096, lastWriteUtc: '2026-11-10T10:00:00Z' }] }] } }))
   await page.route('**/api/v1/clean/delete', route => { deleteCalls++; submitted = route.request().postDataJSON(); return route.fulfill({ json: { deleted: 1, skipped: 0, bytesFreed: 4096 } }) })
   await page.goto('/')
   const home = page.getByRole('main')
@@ -489,14 +489,38 @@ test('clean preview requires a specific selection and confirmation', async ({ pa
   await expect(page.getByText(filePath, { exact: true })).toBeVisible()
   await choice.check()
   await page.getByRole('button', { name: 'Auswahl löschen' }).click()
-  const confirmation = page.getByRole('dialog', { name: 'Dateien endgültig löschen?' })
+  const confirmation = page.getByRole('dialog', { name: 'Ausgewählte Dateien aufräumen?' })
   await expect(confirmation).toBeVisible()
   await confirmation.getByRole('button', { name: 'Abbrechen' }).click()
   expect(deleteCalls).toBe(0)
   await page.getByRole('button', { name: 'Auswahl löschen' }).click()
   await page.getByRole('dialog').getByRole('button', { name: 'Endgültig löschen' }).click()
-  await expect(page.getByRole('status')).toContainText('1 Dateien gelöscht')
+  await expect(page.locator('.clean-result')).toContainText('1 Dateien gelöscht')
   expect(deleteCalls).toBe(1)
   expect(submitted).toEqual({ scanId: 'scan-1', itemIds: ['item-1'] })
+})
+test('clean preview distinguishes unshared and read-only folders', async ({ page, folders }) => {
+  const readOnlyPath = path.join(folders.apps, 'readonly-cache.tmp')
+  await page.route('**/api/v1/clean/scan', route => route.fulfill({ json: {
+    id: 'scan-status',
+    createdUtc: '2026-11-20T10:00:00Z',
+    categories: [
+      { id: 'unshared', title: 'Nicht freigegebener Ordner', description: 'Kein Zugriff', shared: false, exists: false, readOnly: false, truncated: false, items: [] },
+      { id: 'readonly', title: 'Schreibgeschützte Freigabe', description: 'Nur Lesen', shared: true, exists: true, readOnly: true, truncated: false, items: [{ id: 'ro-1', category: 'readonly', path: readOnlyPath, bytes: 4096, lastWriteUtc: '2026-11-10T10:00:00Z' }] },
+    ],
+  } }))
+  await page.goto('/')
+  await page.getByRole('navigation', { name: 'Hauptnavigation' }).getByRole('button', { name: 'Mehr', exact: true }).click()
+  await page.getByRole('button', { name: /Special Clean/ }).click()
+  await page.getByRole('button', { name: 'Jetzt prüfen' }).click()
+
+  const unshared = page.locator('.clean-category').filter({ has: page.getByRole('heading', { name: 'Nicht freigegebener Ordner' }) })
+  await expect(unshared).toContainText('nicht freigegeben')
+  const readOnly = page.locator('.clean-category').filter({ has: page.getByRole('heading', { name: 'Schreibgeschützte Freigabe' }) })
+  await expect(readOnly).toContainText('schreibgeschützt')
+  await readOnly.getByText('Dateien und Speicherorte anzeigen').click()
+  await expect(readOnly.getByText(path.basename(readOnlyPath), { exact: true })).toBeVisible()
+  await expect(readOnly.getByRole('checkbox')).toBeDisabled()
+  await expect(page.getByRole('button', { name: 'Auswahl löschen' })).toBeDisabled()
 })
 })

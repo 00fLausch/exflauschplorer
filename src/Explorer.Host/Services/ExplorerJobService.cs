@@ -218,8 +218,51 @@ public sealed class ExplorerJobService : BackgroundService
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
+        CleanAbandonedStagingDirectories(stoppingToken);
         await PersistCheckpointAsync();
         await Task.WhenAll(WorkerAsync(stoppingToken), WorkerAsync(stoppingToken), CheckpointLoopAsync(stoppingToken));
+    }
+
+    internal int CleanAbandonedStagingDirectories(CancellationToken cancellationToken)
+    {
+        var removed = 0;
+        var options = new EnumerationOptions
+        {
+            RecurseSubdirectories = true,
+            IgnoreInaccessible = true,
+            AttributesToSkip = FileAttributes.ReparsePoint
+        };
+        foreach (var root in _policy.Roots)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            string[] directories;
+            try { directories = Directory.EnumerateDirectories(root.Path, ".wme-*.partial", options).ToArray(); }
+            catch (Exception error) when (error is IOException or UnauthorizedAccessException or System.Security.SecurityException) { continue; }
+            foreach (var staging in directories)
+            {
+                if (!TryParseStagingJobId(Path.GetFileName(staging), out var jobId)) continue;
+                if (_jobs.Values.Any(job => job.Id.Equals(jobId, StringComparison.OrdinalIgnoreCase) && !job.IsIdle)) continue;
+                try
+                {
+                    File.SetAttributes(staging, FileAttributes.Normal);
+                    Directory.Delete(staging, recursive: true);
+                    removed++;
+                    _logger.LogInformation("Verwaistes 7z-Staging-Verzeichnis {Staging} entfernt", staging);
+                }
+                catch (Exception error) when (error is IOException or UnauthorizedAccessException or System.Security.SecurityException) { }
+            }
+        }
+        return removed;
+    }
+
+    private static bool TryParseStagingJobId(string name, out string jobId)
+    {
+        jobId = string.Empty;
+        if (!name.StartsWith(".wme-", StringComparison.OrdinalIgnoreCase) || !name.EndsWith(".partial", StringComparison.OrdinalIgnoreCase)) return false;
+        var parts = name[5..^8].Split('-');
+        if (parts.Length != 2 || parts.Any(part => part.Length != 32 || !part.All(Uri.IsHexDigit))) return false;
+        jobId = parts[0];
+        return true;
     }
 
     private async Task WorkerAsync(CancellationToken stoppingToken)
@@ -946,14 +989,34 @@ public sealed class ExplorerJobService : BackgroundService
                 }
             }
             target = _policy.AuthorizeEntryMutation(target);
+            if (!_sameVolume(staging, target))
+                throw new IOException("Das Staging-Verzeichnis liegt nicht auf demselben Laufwerk wie das Ziel.");
             Directory.Move(staging, target);
             File.SetAttributes(target, File.GetAttributes(target) & ~FileAttributes.Hidden);
             AddUndo(job, "unzip", source, target);
         }
         catch
         {
-            try { if (Directory.Exists(staging)) Directory.Delete(staging, recursive: true); } catch { }
+            await DeleteStagingAsync(staging);
             throw;
+        }
+    }
+
+    private async Task DeleteStagingAsync(string staging)
+    {
+        for (var attempt = 0; attempt < 20 && Directory.Exists(staging); attempt++)
+        {
+            try
+            {
+                File.SetAttributes(staging, FileAttributes.Normal);
+                Directory.Delete(staging, recursive: true);
+                return;
+            }
+            catch (Exception error) when (error is IOException or UnauthorizedAccessException)
+            {
+                if (attempt == 19) _logger.LogWarning(error, "Staging-Verzeichnis {Staging} konnte nicht gelöscht werden", staging);
+                else await Task.Delay(50);
+            }
         }
     }
 
@@ -997,7 +1060,7 @@ public sealed class ExplorerJobService : BackgroundService
 
         SetTotals(job, destinations.Count, destinations.Where(item => !item.Entry.IsDirectory).Sum(item => item.Entry.Size));
         await WaitIfPausedAsync(job, cancellationToken);
-        await _sevenZip.ExtractAllAsync(archivePath, staging, cancellationToken);
+        await _sevenZip.ExtractAllAsync(archivePath, staging, new SevenZipExtractionLimits(10_000, budget), cancellationToken);
 
         // 7-Zip runs once for a solid archive; validate the resulting tree before it is moved into place.
         var expectedPaths = new HashSet<string>(destinations.Select(item => item.OutputPath), StringComparer.OrdinalIgnoreCase);

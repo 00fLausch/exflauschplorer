@@ -48,7 +48,8 @@ test('iPhone previews and seeks audio/video, shows a shell thumbnail and streams
   await expect(page.getByRole('heading', { name: path.basename(fixtureRoot) })).toBeVisible()
   const breadcrumb = page.getByRole('navigation', { name: 'Pfadnavigation' })
   const breadcrumbItems = breadcrumb.getByRole('button')
-  expect(await breadcrumbItems.count()).toBeGreaterThan(5)
+  const expectedBreadcrumbItems = 1 + fixtureRoot.slice(3).split('\\').filter(Boolean).length
+  expect(await breadcrumbItems.count()).toBe(expectedBreadcrumbItems)
   await expect(breadcrumbItems.last()).toHaveAttribute('aria-current', 'location')
   await expect.poll(() => breadcrumb.evaluate((element: HTMLElement) => element.scrollLeft + element.clientWidth >= element.scrollWidth - 1)).toBe(true)
   const breadcrumbTargets = await breadcrumbItems.evaluateAll((elements) => elements.map((element) => {

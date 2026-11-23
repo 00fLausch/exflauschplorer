@@ -4,7 +4,7 @@ import { apiRequest, formatBytes } from './api'
 import { useModalDialogFocus } from './useModalDialogFocus'
 
 interface CleanItem { id: string; category: string; path: string; bytes: number; lastWriteUtc: string }
-interface CleanCategory { id: string; title: string; description: string; exists: boolean; truncated: boolean; items: CleanItem[] }
+interface CleanCategory { id: string; title: string; description: string; shared: boolean; exists: boolean; readOnly: boolean; truncated: boolean; items: CleanItem[] }
 interface CleanScan { id: string; createdUtc: string; categories: CleanCategory[] }
 interface CleanResult { deleted: number; skipped: number; bytesFreed: number }
 
@@ -20,6 +20,7 @@ export function CleanPage() {
   const abort = useRef<AbortController | null>(null)
   useEffect(() => () => abort.current?.abort(), [])
   const items = scan?.categories.flatMap(category => category.items) ?? []
+  const readOnlyIds = new Set(scan?.categories.filter(category => category.readOnly).flatMap(category => category.items.map(item => item.id)) ?? [])
   const selectedSet = new Set(selected)
   const chosen = items.filter(item => selectedSet.has(item.id))
   const total = chosen.reduce((sum, item) => sum + item.bytes, 0)
@@ -55,15 +56,18 @@ export function CleanPage() {
       <p className="clean-hint">Nur Dateien, die seit mindestens 48 Stunden nicht verändert wurden. Keine Datei ist vorausgewählt.</p>
       {scan.categories.map(category => <section className="clean-category" key={category.id}>
         <div className="clean-category-head"><div><h2>{category.title}</h2><p>{category.description}</p></div><strong>{formatBytes(category.items.reduce((sum, item) => sum + item.bytes, 0))}</strong></div>
-        {!category.exists ? <p className="clean-muted">Ordner nicht vorhanden oder nicht freigegeben.</p> : category.items.length === 0 ? <p className="clean-muted">Keine passenden Dateien gefunden.</p> : <>
-          <button className="clean-select" onClick={() => toggleCategory(category)}>{category.items.every(item => selectedSet.has(item.id)) ? 'Auswahl dieser Kategorie aufheben' : `Alle ${category.items.length} Dateien auswählen`}</button>
-          <details className="clean-items" onToggle={event => { const open = event.currentTarget.open; setExpanded(current => open ? [...new Set([...current, category.id])] : current.filter(id => id !== category.id)) }}><summary>Dateien und Speicherorte anzeigen <ChevronDown size={16} /></summary>
-            {expanded.includes(category.id) && category.items.map(item => <label className="clean-item" key={item.id}><input type="checkbox" checked={selectedSet.has(item.id)} onChange={event => setSelected(current => event.target.checked ? [...current, item.id] : current.filter(id => id !== item.id))} /><span><strong>{item.path.split(/[\\/]/).at(-1)}</strong><small>{item.path}</small></span><b>{formatBytes(item.bytes)}</b></label>)}
-          </details>
+        {!category.shared ? <p className="clean-muted">Ordner ist nicht freigegeben.</p> : !category.exists ? <p className="clean-muted">Ordner nicht vorhanden.</p> : <>
+          {category.readOnly && <p className="clean-muted">Freigabe ist schreibgeschützt. Löschen ist deaktiviert.</p>}
+          {category.items.length === 0 ? <p className="clean-muted">Keine passenden Dateien gefunden.</p> : <>
+            {!category.readOnly && <button className="clean-select" onClick={() => toggleCategory(category)}>{category.items.every(item => selectedSet.has(item.id)) ? 'Auswahl dieser Kategorie aufheben' : `Alle ${category.items.length} Dateien auswählen`}</button>}
+            <details className="clean-items" onToggle={event => { const open = event.currentTarget.open; setExpanded(current => open ? [...new Set([...current, category.id])] : current.filter(id => id !== category.id)) }}><summary>Dateien und Speicherorte anzeigen <ChevronDown size={16} /></summary>
+              {expanded.includes(category.id) && category.items.map(item => <label className="clean-item" key={item.id}><input type="checkbox" checked={selectedSet.has(item.id)} disabled={category.readOnly || deleting} onChange={event => setSelected(current => event.target.checked ? [...current, item.id] : current.filter(id => id !== item.id))} /><span><strong>{item.path.split(/[\\/]/).at(-1)}</strong><small>{item.path}</small></span><b>{formatBytes(item.bytes)}</b></label>)}
+            </details>
+          </>}
         </>}
         {category.truncated && <p className="clean-muted">Vorschau begrenzt oder einzelne Bereiche nicht lesbar.</p>}
       </section>)}
-      <div className="clean-selection"><span>{selected.length} ausgewählt · {formatBytes(total)}</span><button className="primary-button" disabled={selected.length === 0 || deleting} onClick={() => setConfirm(true)}><Trash2 size={17} />Auswahl löschen</button></div>
+      <div className="clean-selection"><span>{selected.length} ausgewählt · {formatBytes(total)}</span><button className="primary-button" disabled={selected.length === 0 || deleting || selected.some(id => readOnlyIds.has(id))} onClick={() => setConfirm(true)}><Trash2 size={17} />Auswahl löschen</button></div>
     </>}
     {confirm && <CleanConfirmation items={chosen} bytes={total} busy={deleting} onCancel={() => setConfirm(false)} onConfirm={() => void remove()} />}
   </div>

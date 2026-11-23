@@ -22,8 +22,8 @@ test('iPhone PWA exposes install metadata, Apple icon, safe areas and an active 
     orientation: string
     icons: Array<{ src: string; sizes: string; type: string; purpose?: string }>
   }
-  expect(manifest.name).toBe('Windows Datei-Explorer')
-  expect(manifest.short_name).toBe('Dateiablage')
+  expect(manifest.name).toBe('EXfLauschPLORER')
+  expect(manifest.short_name).toBe('EXfLauschPLORER')
   expect(manifest.start_url).toBe('/')
   expect(manifest.scope).toBe('/')
   expect(manifest.display).toBe('standalone')
@@ -61,7 +61,7 @@ test('iPhone PWA exposes install metadata, Apple icon, safe areas and an active 
   expect(browserMetadata.viewport).toContain('viewport-fit=cover')
   expect(browserMetadata.capable).toBe('yes')
   expect(browserMetadata.statusBar).toBe('black-translucent')
-  expect(browserMetadata.title).toBe('Dateiablage')
+  expect(browserMetadata.title).toBe('EXfLauschPLORER')
   expect(browserMetadata.appleTouchIcon).toContain('/apple-touch-icon.png')
   expect(browserMetadata.safeTop).not.toBe('')
   expect(browserMetadata.safeBottom).not.toBe('')

@@ -5,7 +5,7 @@ namespace Explorer.Host.Services;
 
 public sealed record CleanLocation(string Id, string Title, string Description, string Root, string Mode);
 public sealed record CleanItem(string Id, string Category, string Path, long Bytes, DateTime LastWriteUtc);
-public sealed record CleanCategory(string Id, string Title, string Description, bool Exists, bool Truncated, IReadOnlyList<CleanItem> Items);
+public sealed record CleanCategory(string Id, string Title, string Description, bool Shared, bool Exists, bool ReadOnly, bool Truncated, IReadOnlyList<CleanItem> Items);
 public sealed record CleanScanDto(string Id, DateTime CreatedUtc, IReadOnlyList<CleanCategory> Categories);
 public sealed record CleanDeleteRequest(string ScanId, IReadOnlyList<string> ItemIds);
 public sealed record CleanDeleteResult(int Deleted, int Skipped, long BytesFreed);
@@ -50,7 +50,9 @@ public sealed class CleanService
             token.ThrowIfCancellationRequested();
             var items = new List<CleanItem>();
             var truncated = false;
-            var exists = Directory.Exists(location.Root) && _policy.IsAllowed(location.Root, write: true);
+            var shared = _policy.IsAllowed(location.Root);
+            var exists = shared && Directory.Exists(location.Root);
+            var readOnly = shared && !_policy.IsAllowed(location.Root, write: true);
             var timer = Stopwatch.StartNew();
             if (exists)
             {
@@ -72,7 +74,7 @@ public sealed class CleanService
                 }
                 catch (Exception e) when (e is IOException or UnauthorizedAccessException or System.Security.SecurityException) { truncated = true; }
             }
-            categories.Add(new CleanCategory(location.Id, location.Title, location.Description, exists, truncated,
+            categories.Add(new CleanCategory(location.Id, location.Title, location.Description, shared, exists, readOnly, truncated,
                 items.OrderByDescending(item => item.Bytes).ToArray()));
         }
         return new CleanScanDto(Guid.NewGuid().ToString("N"), DateTime.UtcNow, categories);
@@ -109,7 +111,7 @@ public sealed class CleanService
                         if (location.Mode == "pycache" && (!Path.GetDirectoryName(path)!.EndsWith("__pycache__", StringComparison.OrdinalIgnoreCase) || !path.EndsWith(".pyc", StringComparison.OrdinalIgnoreCase))) continue;
                         if (Path.GetFileName(path).StartsWith(".wme-", StringComparison.OrdinalIgnoreCase)) continue;
                         var info = new FileInfo(path);
-                        if (info.LastWriteTimeUtc > DateTime.UtcNow - MinimumAge || !_policy.IsAllowed(path, write: true)) continue;
+                        if (info.LastWriteTimeUtc > DateTime.UtcNow - MinimumAge || !_policy.IsAllowed(path)) continue;
                         items.Add(new CleanItem(Guid.NewGuid().ToString("N"), location.Id, info.FullName, info.Length, info.LastWriteTimeUtc));
                     }
                     catch (Exception e) when (e is IOException or UnauthorizedAccessException or System.Security.SecurityException) { truncated = true; }

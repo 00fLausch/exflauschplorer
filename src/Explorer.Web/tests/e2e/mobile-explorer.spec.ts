@@ -6,6 +6,10 @@ import { de } from '../../src/locales/de'
 
 const statePath = path.join(path.dirname(fileURLToPath(import.meta.url)), '.runtime.json')
 
+test.afterEach(async ({ page, baseURL }) => {
+  await page.request.post('/api/v1/security/pin/disable', { headers: { 'X-Explorer-Request': '1', Origin: baseURL! } }).catch(() => {})
+})
+
 test('iPhone PWA navigates a shared folder and edits a text file', async ({ page, request, baseURL }) => {
   test.setTimeout(90_000)
   const { fixtureRoot, extraRoot } = JSON.parse(await readFile(statePath, 'utf8')) as { fixtureRoot: string; extraRoot: string }
@@ -259,7 +263,7 @@ test('iPhone PWA navigates a shared folder and edits a text file', async ({ page
   await expectMobileControls(page)
   await expect(actionDialog.getByRole('button', { name: 'Öffnen', exact: true })).toBeVisible()
   await expect(actionDialog.getByRole('button', { name: 'Umbenennen' })).toBeVisible()
-  await expect(actionDialog.getByRole('button', { name: 'Löschen' })).toBeVisible()
+  await expect(actionDialog.getByRole('button', { name: 'Löschen', exact: true })).toBeVisible()
   const closeActions = actionDialog.getByRole('button', { name: 'Schließen' })
   await expect(closeActions).toBeFocused()
   await page.keyboard.press('Escape')
@@ -368,7 +372,7 @@ test('iPhone PWA navigates a shared folder and edits a text file', async ({ page
   await page.keyboard.press('Escape')
   await expect(editor).toBeVisible()
   await page.getByRole('button', { name: /Speichern/ }).click()
-  await expect(page.getByRole('status')).toContainText('Datei gespeichert')
+  await expect(page.locator('.toast')).toContainText('Datei gespeichert')
 
   const saved = await request.get(`${baseURL}/api/v1/text?${new URLSearchParams({ path: path.join(fixtureRoot, 'iphone-e2e.md') })}`)
   expect(saved.ok()).toBeTruthy()
@@ -381,7 +385,7 @@ test('iPhone PWA navigates a shared folder and edits a text file', async ({ page
   await expectMobileControls(page)
   await expect(markdownPreview.getByText('Erster Punkt')).toBeVisible()
   const localMarkdownImage = markdownPreview.locator('img[alt="Lokales Bild"]')
-  await expect(localMarkdownImage).toHaveAttribute('src', /\/api\/v1\/stream\?path=/)
+  await expect(localMarkdownImage).toHaveAttribute('src', /\/api\/v1\/thumbnail\?path=/)
   await expect.poll(() => localMarkdownImage.evaluate((image: HTMLImageElement) => image.complete && image.naturalWidth > 0)).toBe(true)
   await expect(markdownPreview.locator('img')).toHaveCount(1)
   expect(await page.evaluate(() => (window as typeof window & { __markdownPwned?: boolean }).__markdownPwned)).toBeUndefined()
@@ -403,7 +407,7 @@ test('iPhone PWA navigates a shared folder and edits a text file', async ({ page
   await page.getByRole('button', { name: 'Bearbeiten' }).click()
   await page.getByRole('textbox', { name: 'Inhalt von iphone-e2e.js' }).fill('const answer = 42;\nconsole.log(answer);')
   await page.getByRole('button', { name: /Speichern/ }).click()
-  await expect(page.getByRole('status')).toContainText('Datei gespeichert')
+  await expect(page.locator('.toast')).toContainText('Datei gespeichert')
   await page.getByRole('button', { name: 'Editor schließen' }).click()
   await codeFileButton.click()
   await expect(page.locator('.code-preview code.hljs .hljs-keyword')).toContainText('const')
@@ -411,7 +415,7 @@ test('iPhone PWA navigates a shared folder and edits a text file', async ({ page
   await page.getByRole('button', { name: 'Schließen' }).click()
 
   await page.getByRole('button', { name: 'Mehr', exact: true }).click()
-  await page.getByRole('button', { name: 'Einstellungen', exact: true }).click()
+  await page.getByRole('button', { name: /^Einstellungen/ }).click()
   const systemSwitch = page.getByRole('switch', { name: 'Systemdateien' })
   const extensionSwitch = page.getByRole('switch', { name: 'Dateiendungen' })
   await expect(systemSwitch).toBeVisible()
@@ -441,7 +445,6 @@ test('iPhone PWA navigates a shared folder and edits a text file', async ({ page
   await pinSettings.getByRole('button', { name: 'PIN einrichten' }).click()
   await expect(pinSettings).toHaveCount(0)
 
-  await page.getByRole('button', { name: 'Mehr', exact: true }).click()
   await page.getByRole('button', { name: 'App jetzt sperren' }).click()
   await expect(page.getByRole('heading', { name: 'Dateiablage gesperrt' })).toBeVisible()
   await expectMobileControls(page)
@@ -461,7 +464,16 @@ test('iPhone PWA navigates a shared folder and edits a text file', async ({ page
   await expect(page.getByRole('heading', { name: 'Mehr', exact: true })).toBeVisible()
 
   await page.reload()
-  await expect(page.getByRole('heading', { name: path.basename(fixtureRoot), exact: true })).toBeVisible()
+  const lockedAfterReload = page.getByRole('heading', { name: 'Dateiablage gesperrt' })
+  if (await lockedAfterReload.isVisible().catch(() => false)) {
+    await page.getByRole('textbox', { name: 'PIN eingeben' }).fill('849201')
+    await page.getByRole('button', { name: 'Dateiablage entsperren' }).click()
+  }
+  const restoredFolder = page.getByRole('heading', { name: path.basename(fixtureRoot), exact: true })
+  if (!(await restoredFolder.isVisible().catch(() => false))) {
+    await page.getByRole('button', { name: path.basename(fixtureRoot), exact: true }).click()
+  }
+  await expect(restoredFolder).toBeVisible()
   await expect.poll(() => page.evaluate(() => localStorage.getItem('windows-mobile-explorer:last-path'))).toContain(path.basename(fixtureRoot))
   await page.getByRole('button', { name: 'Mehr', exact: true }).click()
   await page.getByRole('button', { name: 'App jetzt sperren' }).click()

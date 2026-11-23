@@ -187,6 +187,53 @@ public sealed class FilesystemIntegrationTests : IDisposable
     }
 
     [Fact]
+    public async Task SevenZipExtractAllAbortsWhenLiveStagingUsageExceedsLimits()
+    {
+        var sevenZip = SevenZipArchiveService.FindExecutable();
+        if (sevenZip is null) return;
+        var source = Path.Combine(_root, "limit-source");
+        Directory.CreateDirectory(source);
+        await File.WriteAllTextAsync(Path.Combine(source, "payload.txt"), new string('x', 4096));
+        var archive = await CreateSevenZipArchive(sevenZip, source, Path.Combine(_root, "limit.7z"));
+        var staging = Path.Combine(_root, "limit-staging");
+        var service = new SevenZipArchiveService(sevenZip, _ => (2048, 1));
+
+        var started = DateTimeOffset.UtcNow;
+        var error = await Assert.ThrowsAsync<InvalidDataException>(() =>
+            service.ExtractAllAsync(archive, staging, new SevenZipExtractionLimits(100, 1024), CancellationToken.None));
+
+        Assert.Contains("während des Entpackens", error.Message);
+        Assert.True(DateTimeOffset.UtcNow - started < TimeSpan.FromSeconds(10));
+    }
+
+    [Fact]
+    public async Task SevenZipStagingRejectsExtractionBombAndLeavesNoPartialDirectory()
+    {
+        var sevenZip = SevenZipArchiveService.FindExecutable();
+        if (sevenZip is null) return;
+        var source = Path.Combine(_root, "bomb-source");
+        Directory.CreateDirectory(source);
+        var payload = Path.Combine(source, "zeros.bin");
+        await using (var stream = new FileStream(payload, FileMode.CreateNew, FileAccess.Write)) stream.SetLength(160L * 1024 * 1024);
+        var archive = await CreateSevenZipArchive(sevenZip, source, Path.Combine(_root, "bomb.7z"));
+        Directory.Delete(source, recursive: true);
+
+        using var service = CreateJobService();
+        await service.StartAsync(CancellationToken.None);
+        try
+        {
+            var created = await service.EnqueueAsync(new OperationRequest("unzip", [archive], _root, "bomb-target"), CancellationToken.None);
+            var job = await WaitForJobAsync(service, created.Id, TimeSpan.FromSeconds(60));
+
+            Assert.Equal("failed", job.Status);
+            Assert.False(string.IsNullOrWhiteSpace(job.Error));
+            Assert.False(Directory.Exists(Path.Combine(_root, "bomb-target")));
+            Assert.Empty(Directory.EnumerateDirectories(_root, ".wme-*.partial", SearchOption.AllDirectories));
+        }
+        finally { await service.StopAsync(CancellationToken.None); }
+    }
+
+    [Fact]
     public async Task PropertiesReadPhotoAndMediaShellMetadataWithoutFailingWhenAHandlerIsMissing()
     {
         var imagePath = Path.Combine(_root, "Bild ä.jpg");
@@ -903,6 +950,33 @@ public sealed class FilesystemIntegrationTests : IDisposable
             await Task.Delay(20);
         }
         throw new TimeoutException($"Auftrag {id} wurde nicht rechtzeitig abgeschlossen.");
+    }
+
+    private static async Task<string> CreateSevenZipArchive(string sevenZip, string sourceDirectory, string archivePath)
+    {
+        var start = new ProcessStartInfo(sevenZip)
+        {
+            UseShellExecute = false,
+            CreateNoWindow = true,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            StandardOutputEncoding = Encoding.UTF8,
+            StandardErrorEncoding = Encoding.UTF8,
+            WorkingDirectory = sourceDirectory
+        };
+        start.ArgumentList.Add("a");
+        start.ArgumentList.Add("-t7z");
+        start.ArgumentList.Add("-bd");
+        start.ArgumentList.Add(archivePath);
+        start.ArgumentList.Add(".");
+        using (var process = Process.Start(start) ?? throw new InvalidOperationException("7-Zip konnte im Integrationstest nicht gestartet werden."))
+        {
+            var stdout = process.StandardOutput.ReadToEndAsync();
+            var stderr = process.StandardError.ReadToEndAsync();
+            await process.WaitForExitAsync();
+            Assert.True(process.ExitCode == 0, $"7-Zip-Testarchiv konnte nicht angelegt werden: {await stderr}{await stdout}");
+        }
+        return archivePath;
     }
 
     private sealed class TestRecycleBin(string root) : IRecycleBinService

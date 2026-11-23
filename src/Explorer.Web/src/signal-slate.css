@@ -518,7 +518,7 @@ body {
 .folder-toolbar { min-height: 46px; padding: 0 8px; }
 .path-entry-button { min-height: 44px; margin-left: 0; padding-left: 3px; }
 .breadcrumb-list { gap: 0; }
-.crumb-part { min-width: 0; gap: 0; padding: 0; }
+.crumb-part { min-width: 44px; height: 44px; gap: 0; padding: 0 2px; }
 .crumb-part .crumb-label { max-width: none; overflow: visible; text-overflow: clip; }
 .crumb-part .crumb-separator { max-width: none; padding: 0 2px; color: var(--muted); }
 .entry-copy { flex-direction: row; align-items: baseline; gap: 8px; }

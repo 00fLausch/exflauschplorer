@@ -1,6 +1,6 @@
 namespace Explorer.Host.Services;
 
-public sealed class UploadMaintenanceService(UploadSessionService uploads, TextDocumentService textDocuments) : BackgroundService
+public sealed class UploadMaintenanceService(UploadSessionService uploads, TextDocumentService textDocuments, ExplorerJobService jobs) : BackgroundService
 {
     private static readonly TimeSpan PartialLifetime = TimeSpan.FromDays(7);
 
@@ -11,6 +11,7 @@ public sealed class UploadMaintenanceService(UploadSessionService uploads, TextD
         {
             await uploads.ExpireSessionsAsync(stoppingToken);
             await textDocuments.CleanupAbandonedPartialsAsync(PartialLifetime, stoppingToken);
+            jobs.CleanAbandonedStagingDirectories(stoppingToken);
         }
         while (await timer.WaitForNextTickAsync(stoppingToken));
     }

@@ -5,6 +5,7 @@ using System.Text;
 namespace Explorer.Host.Services;
 
 public sealed record SevenZipArchiveEntry(string Path, long Size, bool IsDirectory, bool IsLink);
+public sealed record SevenZipExtractionLimits(int MaximumEntries, long MaximumBytes);
 
 /// <summary>Reads and extracts 7-Zip entries without asking 7-Zip to choose output paths.</summary>
 public sealed class SevenZipArchiveService
@@ -15,8 +16,15 @@ public sealed class SevenZipArchiveService
     private static readonly TimeSpan ListingTimeout = TimeSpan.FromSeconds(45);
     private static readonly TimeSpan ExtractionTimeout = TimeSpan.FromMinutes(10);
     private readonly string? _executablePath;
+    private readonly Func<string, (long Bytes, int Entries)> _measureStaging;
 
-    public SevenZipArchiveService() => _executablePath = FindExecutable();
+    public SevenZipArchiveService() : this(null, null) { }
+
+    public SevenZipArchiveService(string? executablePath, Func<string, (long Bytes, int Entries)>? measureStaging = null)
+    {
+        _executablePath = executablePath ?? FindExecutable();
+        _measureStaging = measureStaging ?? MeasureStaging;
+    }
 
     public bool IsAvailable => _executablePath is not null;
 
@@ -86,7 +94,7 @@ public sealed class SevenZipArchiveService
         }
     }
 
-    public async Task ExtractAllAsync(string archivePath, string outputDirectory, CancellationToken cancellationToken)
+    public async Task ExtractAllAsync(string archivePath, string outputDirectory, SevenZipExtractionLimits limits, CancellationToken cancellationToken)
     {
         Directory.CreateDirectory(outputDirectory);
         var start = CreateStartInfo("x");
@@ -100,11 +108,67 @@ public sealed class SevenZipArchiveService
         await RunAsync(start, ExtractionTimeout,
             async (process, token) =>
             {
-                await process.StandardOutput.BaseStream.CopyToAsync(Stream.Null, token);
-                return true;
+                using var monitorCancellation = CancellationTokenSource.CreateLinkedTokenSource(token);
+                var violation = new TaskCompletionSource<InvalidDataException>(TaskCreationOptions.RunContinuationsAsynchronously);
+                var monitor = Task.Run(async () =>
+                {
+                    try
+                    {
+                        using var timer = new PeriodicTimer(TimeSpan.FromMilliseconds(100));
+                        while (true)
+                        {
+                            var (bytes, entries) = _measureStaging(outputDirectory);
+                            if (bytes > limits.MaximumBytes || entries > limits.MaximumEntries)
+                            {
+                                violation.TrySetResult(new InvalidDataException(
+                                    "Das 7-Zip-Archiv überschreitet während des Entpackens das Größen- oder Eintragslimit."));
+                                TryKill(process);
+                                return;
+                            }
+                            await timer.WaitForNextTickAsync(monitorCancellation.Token);
+                        }
+                    }
+                    catch (OperationCanceledException) { }
+                    catch (IOException) { }
+                    catch (UnauthorizedAccessException) { }
+                }, CancellationToken.None);
+
+                try
+                {
+                    var drain = process.StandardOutput.BaseStream.CopyToAsync(Stream.Null, token);
+                    if (await Task.WhenAny(drain, violation.Task) == violation.Task) throw await violation.Task;
+                    await drain;
+                    return true;
+                }
+                finally
+                {
+                    monitorCancellation.Cancel();
+                    try { await monitor.WaitAsync(TimeSpan.FromSeconds(2)); }
+                    catch (TimeoutException) { }
+                }
             },
             "Das 7-Zip-Archiv konnte nicht vollständig entpackt werden. Es ist möglicherweise beschädigt oder kennwortgeschützt.",
             cancellationToken);
+    }
+
+    private static (long Bytes, int Entries) MeasureStaging(string directory)
+    {
+        var options = new EnumerationOptions
+        {
+            RecurseSubdirectories = true,
+            IgnoreInaccessible = true,
+            AttributesToSkip = FileAttributes.ReparsePoint
+        };
+        long bytes = 0;
+        var entries = 0;
+        foreach (var path in Directory.EnumerateFileSystemEntries(directory, "*", options))
+        {
+            entries++;
+            if (!File.Exists(path)) continue;
+            try { bytes += new FileInfo(path).Length; }
+            catch (Exception error) when (error is IOException or UnauthorizedAccessException or System.Security.SecurityException) { }
+        }
+        return (bytes, entries);
     }
 
     private static async Task<long> CopyEntryAsync(Stream input, Stream output, long? expectedSize,
