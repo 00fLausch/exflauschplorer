@@ -4,7 +4,11 @@
 
 **Your Windows PC. Your files. On your phone — even on the go.**
 
-EXfLauschPLORER connects a Windows PC to your smartphone through your private Tailscale network. Open drives and folders, manage files, and stream music or video directly from the PC. On the phone, the UI runs as a web app in the browser or like an app from the home screen; the Windows PC provides the files.
+You know the moment: you’re on the road, and the file you need is sitting on your Windows PC at home. The usual options are clunky, limited, or both.
+
+EXfLauschPLORER is the free, private, encrypted alternative: your own PC, reachable from your phone over Tailscale, with the drives, folders, and familiar Explorer structure you already know. Stream music and video, preview documents and images, and move files both ways — no subscription, no public file cloud, no second desktop to learn. It’s remote access that feels like your own Explorer, not a screen mirror.
+
+On the phone, the UI runs as a web app in the browser or like an app from the home screen; the Windows PC provides the files.
 
 *The app and installer UI are currently German; menu labels in this README are translated for readability.*
 
