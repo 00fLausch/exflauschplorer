@@ -65,7 +65,7 @@ The script builds the frontend and the Windows host if needed. Creating the inst
 
 ## Project status
 
-The detailed status matrix, including limitations and open hardware/iOS checks, is in [FEATURES.md](FEATURES.md). “Done” means implemented and covered by the corresponding automated test; hardware, iOS, and media benchmarks are marked separately as not verified.
+The detailed status matrix, including limitations and open hardware/iOS checks, is in [FEATURES.md](FEATURES.md). “Done” means implemented and covered by the corresponding automated test; hardware, iOS, and media benchmarks are marked separately as not verified. Version history is in [CHANGELOG.md](CHANGELOG.md).
 
 ## How it works
 
@@ -82,3 +82,11 @@ iPhone / Android browser or home-screen app
 ```
 
 The server runs in the logged-in Windows session. Tailscale Serve brokers the connection; the app checks the Tailscale identity and its shares. The server listens on `127.0.0.1`, not directly on the local network.
+
+## Contributing
+
+Bug reports and feature ideas are welcome. Read [CONTRIBUTING.md](CONTRIBUTING.md) and use the [bug-report form](.github/ISSUE_TEMPLATE/bug_report.yml). For security issues, see [SECURITY.md](SECURITY.md) — do not open a public issue.
+
+## License
+
+EXfLauschPLORER is licensed under the [MIT License](LICENSE). Dependencies retain their own licenses.
