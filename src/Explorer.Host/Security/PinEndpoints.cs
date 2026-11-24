@@ -1,4 +1,5 @@
 using Explorer.Core.Models;
+using Microsoft.Extensions.Logging;
 
 namespace Explorer.Host.Security;
 
@@ -14,15 +15,7 @@ public static class PinEndpoints
         routes.MapGet("/status", (HttpContext context, PinProtectionService pins) =>
             Results.Ok(pins.GetStatus(Identity(context), ReadSession(context.Request))));
         routes.MapPost("/configure", (HttpContext context, PinRequest request, PinProtectionService pins, ExplorerLiveStreams streams, ExplorerRequestTrust trust) =>
-        {
-            var result = pins.Configure(Identity(context), request.Pin, ReadSession(context.Request));
-            if (result.Success)
-            {
-                streams.Revoke(all: true);
-                app.Logger.LogInformation("Zusätzlicher PIN von {User} eingerichtet oder geändert", Identity(context));
-            }
-            return Complete(context, result, trust);
-        });
+            Configure(context, request, pins, streams, trust, app.Logger));
         routes.MapPost("/unlock", (HttpContext context, PinRequest request, PinProtectionService pins, ExplorerRequestTrust trust) =>
         {
             var result = pins.Unlock(Identity(context), request.Pin);
@@ -30,19 +23,43 @@ public static class PinEndpoints
             return Complete(context, result, trust);
         });
         routes.MapPost("/lock", (HttpContext context, PinProtectionService pins, ExplorerLiveStreams streams, ExplorerRequestTrust trust) =>
+            Lock(context, pins, streams, trust, app.Logger));
+        routes.MapPost("/disable", (HttpContext context, PinProtectionService pins, ExplorerLiveStreams streams, ExplorerRequestTrust trust) =>
+            Disable(context, pins, streams, trust, app.Logger));
+    }
+
+    internal static IResult Configure(HttpContext context, PinRequest request, PinProtectionService pins,
+        ExplorerLiveStreams streams, ExplorerRequestTrust trust, ILogger logger)
+    {
+        var result = pins.Configure(Identity(context), request.Pin, ReadSession(context.Request));
+        if (result.Success)
         {
-            var session = ReadSession(context.Request);
-            if (pins.Lock(Identity(context), session)) streams.Revoke(session);
-            DeleteCookie(context, trust);
-            app.Logger.LogInformation("PIN-Sitzung von {User} gesperrt", Identity(context));
-            return Results.NoContent();
-        });
-        routes.MapPost("/disable", (HttpContext context, PinProtectionService pins, ExplorerRequestTrust trust) =>
+            streams.Revoke(all: true);
+            logger.LogInformation("Zusätzlicher PIN von {User} eingerichtet oder geändert", Identity(context));
+        }
+        return Complete(context, result, trust);
+    }
+
+    internal static IResult Lock(HttpContext context, PinProtectionService pins, ExplorerLiveStreams streams,
+        ExplorerRequestTrust trust, ILogger logger)
+    {
+        var session = ReadSession(context.Request);
+        if (pins.Lock(Identity(context), session)) streams.Revoke(session);
+        DeleteCookie(context, trust);
+        logger.LogInformation("PIN-Sitzung von {User} gesperrt", Identity(context));
+        return Results.NoContent();
+    }
+
+    internal static IResult Disable(HttpContext context, PinProtectionService pins, ExplorerLiveStreams streams,
+        ExplorerRequestTrust trust, ILogger logger)
+    {
+        var result = pins.Disable(Identity(context), ReadSession(context.Request));
+        if (result.Success)
         {
-            var result = pins.Disable(Identity(context), ReadSession(context.Request));
-            if (result.Success) app.Logger.LogWarning("Zusätzlicher PIN von {User} ausgeschaltet", Identity(context));
-            return Complete(context, result, trust);
-        });
+            streams.Revoke(all: true);
+            logger.LogWarning("Zusätzlicher PIN von {User} ausgeschaltet", Identity(context));
+        }
+        return Complete(context, result, trust);
     }
 
     internal static string? ReadSession(HttpRequest request) => request.Cookies[CookieName];

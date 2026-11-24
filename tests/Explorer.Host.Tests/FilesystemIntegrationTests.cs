@@ -16,6 +16,7 @@ public sealed class FilesystemIntegrationTests : IDisposable
     private readonly string _root = Path.Combine(Path.GetTempPath(), $"WME-Integration-Ä- {Guid.NewGuid():N}");
     private readonly PathAccessPolicy _policy;
     private readonly ITestOutputHelper _output;
+    private readonly List<string> _junctions = [];
 
     public FilesystemIntegrationTests(ITestOutputHelper output)
     {
@@ -229,6 +230,34 @@ public sealed class FilesystemIntegrationTests : IDisposable
             Assert.False(string.IsNullOrWhiteSpace(job.Error));
             Assert.False(Directory.Exists(Path.Combine(_root, "bomb-target")));
             Assert.Empty(Directory.EnumerateDirectories(_root, ".wme-*.partial", SearchOption.AllDirectories));
+        }
+        finally { await service.StopAsync(CancellationToken.None); }
+    }
+
+    [Fact]
+    public async Task SevenZipStagingRejectsDirectoryLinksBeforeExtractionAndLeavesNothingOutside()
+    {
+        var sevenZip = SevenZipArchiveService.FindExecutable();
+        if (sevenZip is null) return;
+        var outside = Path.Combine(_root, "link-outside");
+        Directory.CreateDirectory(outside);
+        var archive = await CreateSevenZipArchiveWithDirectoryLink(sevenZip, outside, Path.Combine(_root, "link.7z"));
+        var entries = await new SevenZipArchiveService(sevenZip).ListEntriesAsync(archive, CancellationToken.None);
+        Assert.Contains(entries, entry => entry.IsLink);
+        Assert.Contains(entries, entry => entry.Path.EndsWith("escaped.txt", StringComparison.OrdinalIgnoreCase));
+
+        using var service = CreateJobService();
+        await service.StartAsync(CancellationToken.None);
+        try
+        {
+            var created = await service.EnqueueAsync(new OperationRequest("unzip", [archive], _root, "link-target"), CancellationToken.None);
+            var job = await WaitForJobAsync(service, created.Id, TimeSpan.FromSeconds(60));
+
+            Assert.Equal("failed", job.Status);
+            Assert.False(string.IsNullOrWhiteSpace(job.Error));
+            Assert.False(Directory.Exists(Path.Combine(_root, "link-target")));
+            Assert.Empty(Directory.EnumerateFiles(outside));
+            Assert.Empty(Directory.EnumerateDirectories(_root, ".wme-*.partial"));
         }
         finally { await service.StopAsync(CancellationToken.None); }
     }
@@ -979,6 +1008,61 @@ public sealed class FilesystemIntegrationTests : IDisposable
         return archivePath;
     }
 
+    private async Task<string> CreateSevenZipArchiveWithDirectoryLink(string sevenZip, string outsideDirectory, string archivePath)
+    {
+        var realSource = Path.Combine(_root, "link-real");
+        var realLink = Path.Combine(realSource, "source", "link");
+        Directory.CreateDirectory(realLink);
+        await File.WriteAllTextAsync(Path.Combine(realLink, "escaped.txt"), "darf nicht geschrieben werden", Encoding.UTF8);
+        var archive = await CreateSevenZipArchive(sevenZip, realSource, archivePath);
+
+        var linkSource = Path.Combine(_root, "link-source");
+        Directory.CreateDirectory(Path.Combine(linkSource, "source"));
+        var link = Path.Combine(linkSource, "source", "link");
+        var junctionStart = new ProcessStartInfo("cmd.exe")
+        {
+            UseShellExecute = false,
+            CreateNoWindow = true,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            WorkingDirectory = linkSource
+        };
+        junctionStart.Arguments = $"/c mklink /J \"{link}\" \"{outsideDirectory}\"";
+        using (var process = Process.Start(junctionStart) ?? throw new InvalidOperationException("mklink konnte nicht gestartet werden."))
+        {
+            var stdout = process.StandardOutput.ReadToEndAsync();
+            var stderr = process.StandardError.ReadToEndAsync();
+            await process.WaitForExitAsync();
+            Assert.True(process.ExitCode == 0, $"Verzeichnisverknüpfung konnte nicht angelegt werden: {await stderr}{await stdout}");
+        }
+        _junctions.Add(link);
+
+        var update = new ProcessStartInfo(sevenZip)
+        {
+            UseShellExecute = false,
+            CreateNoWindow = true,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            StandardOutputEncoding = Encoding.UTF8,
+            StandardErrorEncoding = Encoding.UTF8,
+            WorkingDirectory = linkSource
+        };
+        update.ArgumentList.Add("a");
+        update.ArgumentList.Add("-t7z");
+        update.ArgumentList.Add("-bd");
+        update.ArgumentList.Add("-snl");
+        update.ArgumentList.Add(archive);
+        update.ArgumentList.Add(".");
+        using (var process = Process.Start(update) ?? throw new InvalidOperationException("7-Zip konnte im Integrationstest nicht gestartet werden."))
+        {
+            var stdout = process.StandardOutput.ReadToEndAsync();
+            var stderr = process.StandardError.ReadToEndAsync();
+            await process.WaitForExitAsync();
+            Assert.True(process.ExitCode == 0, $"7-Zip-Linkarchiv konnte nicht angelegt werden: {await stderr}{await stdout}");
+        }
+        return archive;
+    }
+
     private sealed class TestRecycleBin(string root) : IRecycleBinService
     {
         private readonly Dictionary<string, string> _items = new(StringComparer.OrdinalIgnoreCase);
@@ -1031,6 +1115,12 @@ public sealed class FilesystemIntegrationTests : IDisposable
 
     public void Dispose()
     {
+        foreach (var junction in _junctions)
+        {
+            try { if (Directory.Exists(junction)) Directory.Delete(junction); }
+            catch (IOException) { }
+            catch (UnauthorizedAccessException) { }
+        }
         try { Directory.Delete(_root, recursive: true); }
         catch (IOException) { }
         catch (UnauthorizedAccessException) { }

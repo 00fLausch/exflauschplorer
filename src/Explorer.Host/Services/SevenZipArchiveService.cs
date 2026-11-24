@@ -99,7 +99,8 @@ public sealed class SevenZipArchiveService
         Directory.CreateDirectory(outputDirectory);
         var start = CreateStartInfo("x");
         start.ArgumentList.Add("-y");
-        start.ArgumentList.Add("-snld");
+        start.ArgumentList.Add("-snld0");
+        start.ArgumentList.Add("-snz");
         start.ArgumentList.Add("-spd");
         start.ArgumentList.Add($"-o{outputDirectory}");
         start.ArgumentList.Add("--");
@@ -307,8 +308,11 @@ public sealed class SevenZipArchiveService
             if (fields.GetValueOrDefault("Encrypted", "-") == "+")
                 throw new InvalidDataException("Kennwortgeschützte 7-Zip-Archive werden nicht unterstützt.");
             totalBytes += size;
+            var attributes = fields.GetValueOrDefault("Attributes", "");
             var folder = fields.GetValueOrDefault("Folder", "-").Equals("+", StringComparison.Ordinal) ||
-                fields.GetValueOrDefault("Attributes", "").Contains('D');
+                attributes.Contains('D');
+            // 7-Zip markiert echte Links in der -slt-Ausgabe nur mit "L" in Attributes.
+            if (attributes.Contains('L')) link = true;
             entries.Add(new SevenZipArchiveEntry(path, size, folder, link));
             fields.Clear();
             link = false;

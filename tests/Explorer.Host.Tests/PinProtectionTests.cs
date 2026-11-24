@@ -2,6 +2,8 @@ using System.Text.Json;
 using Explorer.Host.Configuration;
 using Explorer.Host.Security;
 using Microsoft.AspNetCore.Http;
+using Microsoft.AspNetCore.Http.Features;
+using Microsoft.Extensions.Logging.Abstractions;
 
 namespace Explorer.Host.Tests;
 
@@ -108,13 +110,127 @@ public sealed class PinProtectionTests
         Assert.True(reachedNext);
     }
 
-    private static DefaultHttpContext CreateContext(string path)
+    [Fact]
+    public async Task LockEndpointAbortsOnlyStreamsOfTheCurrentSession()
+    {
+        const string owner = "owner@example.com";
+        const string other = "other@example.com";
+        const string pin = "849201";
+        var settings = new ExplorerSettings();
+        var pins = new PinProtectionService(settings, _ => { });
+        var streams = new ExplorerLiveStreams(pins);
+        var trust = new ExplorerRequestTrust(settings, isolatedTest: true);
+        var first = pins.Configure(owner, pin, null);
+        var second = pins.Unlock(owner, pin);
+        var otherSession = pins.Unlock(other, pin);
+        Assert.True(first.Success && second.Success && otherSession.Success);
+
+        var firstStream = new TrackedStream();
+        var secondStream = new TrackedStream();
+        var otherStream = new TrackedStream();
+        var firstTask = TrackStreamAsync(streams, firstStream, owner, first.SessionToken);
+        var secondTask = TrackStreamAsync(streams, secondStream, owner, second.SessionToken);
+        var otherTask = TrackStreamAsync(streams, otherStream, other, otherSession.SessionToken);
+
+        var context = CreateContext("/api/v1/security/pin/lock", owner, first.SessionToken);
+        _ = PinEndpoints.Lock(context, pins, streams, trust, NullLogger.Instance);
+
+        Assert.True(await CompletesWithin(firstStream.Aborted.Task));
+        Assert.False(secondStream.Aborted.Task.IsCompleted);
+        Assert.False(otherStream.Aborted.Task.IsCompleted);
+
+        streams.Revoke(all: true);
+        await Task.WhenAll(firstTask, secondTask, otherTask);
+    }
+
+    [Fact]
+    public async Task ConfigureAndDisableEndpointsAbortAllStreams()
+    {
+        const string owner = "owner@example.com";
+        var settings = new ExplorerSettings();
+        var pins = new PinProtectionService(settings, _ => { });
+        var streams = new ExplorerLiveStreams(pins);
+        var trust = new ExplorerRequestTrust(settings, isolatedTest: true);
+        var first = pins.Configure(owner, "849201", null);
+        var second = pins.Unlock(owner, "849201");
+        Assert.True(first.Success && second.Success);
+
+        var firstStream = new TrackedStream();
+        var secondStream = new TrackedStream();
+        var firstTask = TrackStreamAsync(streams, firstStream, owner, first.SessionToken);
+        var secondTask = TrackStreamAsync(streams, secondStream, owner, second.SessionToken);
+
+        var changeContext = CreateContext("/api/v1/security/pin/configure", owner, first.SessionToken);
+        _ = PinEndpoints.Configure(changeContext, new PinRequest("123789"), pins, streams, trust, NullLogger.Instance);
+
+        Assert.True(await CompletesWithin(firstStream.Aborted.Task));
+        Assert.True(await CompletesWithin(secondStream.Aborted.Task));
+        await Task.WhenAll(firstTask, secondTask);
+
+        var third = pins.Unlock(owner, "123789");
+        var fourth = pins.Unlock(owner, "123789");
+        Assert.True(third.Success && fourth.Success);
+        var thirdStream = new TrackedStream();
+        var fourthStream = new TrackedStream();
+        var thirdTask = TrackStreamAsync(streams, thirdStream, owner, third.SessionToken);
+        var fourthTask = TrackStreamAsync(streams, fourthStream, owner, fourth.SessionToken);
+
+        var disableContext = CreateContext("/api/v1/security/pin/disable", owner, third.SessionToken);
+        _ = PinEndpoints.Disable(disableContext, pins, streams, trust, NullLogger.Instance);
+
+        Assert.True(await CompletesWithin(thirdStream.Aborted.Task));
+        Assert.True(await CompletesWithin(fourthStream.Aborted.Task));
+        await Task.WhenAll(thirdTask, fourthTask);
+        Assert.Null(settings.PinHash);
+    }
+
+    private static async Task<bool> CompletesWithin(Task task) =>
+        await Task.WhenAny(task, Task.Delay(TimeSpan.FromSeconds(2))) == task;
+
+    private static async Task TrackStreamAsync(ExplorerLiveStreams streams, TrackedStream tracked,
+        string identity, string? session)
+    {
+        var context = CreateContext("/api/v1/watch", identity, session);
+        context.Features.Set<IHttpRequestLifetimeFeature>(new AbortFeature(tracked.Aborted));
+        await streams.InvokeAsync(context, async _ =>
+        {
+            await tracked.Aborted.Task;
+            tracked.Finished.TrySetResult(true);
+        });
+    }
+
+    private static DefaultHttpContext CreateContext(string path) =>
+        CreateContext(path, "owner@example.com", null);
+
+    private static DefaultHttpContext CreateContext(string path, string identity, string? session)
     {
         var context = new DefaultHttpContext();
         context.Request.Path = path;
-        context.Items["Explorer.User"] = "owner@example.com";
+        context.Items["Explorer.User"] = identity;
         context.Response.Body = new MemoryStream();
+        if (session is not null) context.Request.Headers.Cookie = $"Explorer.PinSession={session}";
         return context;
+    }
+
+    private sealed class TrackedStream
+    {
+        public TaskCompletionSource<bool> Aborted { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource<bool> Finished { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    }
+
+    private sealed class AbortFeature(TaskCompletionSource<bool> signal) : IHttpRequestLifetimeFeature
+    {
+        private readonly CancellationTokenSource _source = new();
+        public CancellationToken RequestAborted
+        {
+            get => _source.Token;
+            set { }
+        }
+        public void Abort()
+        {
+            signal.TrySetResult(true);
+            _source.Cancel();
+        }
     }
 
     private sealed record PinError(string Message, string? Code);
